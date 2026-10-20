@@ -1,6 +1,8 @@
 //! Hailer owns its PostgreSQL schema. Feedback and its deduplication key commit
 //! with suppression changes before acknowledging SQS.
 
+mod bulk;
+pub mod sync;
 #[cfg(test)]
 mod tests;
 
@@ -202,34 +204,7 @@ pub(crate) async fn merge_all(
     transaction: &mut Transaction<'_, Postgres>,
     records: &[Suppression],
 ) -> anyhow::Result<()> {
-    for record in records {
-        let reason = match record.reason {
-            SuppressionReason::Bounce => "bounce",
-            SuppressionReason::Complaint => "complaint",
-        };
-        sqlx::query(
-            "INSERT INTO hailer.suppressions AS current \
-                (email_address, reason, suppressed_at, originating_message_id, source_event_id, metadata) \
-             VALUES ($1, $2, $3::text::timestamptz, $4, $5, $6) \
-             ON CONFLICT (email_address) DO UPDATE SET \
-                reason = EXCLUDED.reason, \
-                suppressed_at = LEAST(current.suppressed_at, EXCLUDED.suppressed_at), \
-                originating_message_id = EXCLUDED.originating_message_id, \
-                source_event_id = EXCLUDED.source_event_id, \
-                metadata = CASE WHEN EXCLUDED.metadata = 'null'::jsonb \
-                    THEN current.metadata ELSE EXCLUDED.metadata END \
-             WHERE current.reason <> 'complaint'",
-        )
-        .bind(&record.email_address)
-        .bind(reason)
-        .bind(&record.suppressed_at)
-        .bind(&record.originating_message_id)
-        .bind(&record.source_event_id)
-        .bind(Json(&record.metadata))
-        .execute(&mut **transaction)
-        .await?;
-    }
-    Ok(())
+    bulk::merge(transaction, records).await
 }
 
 /// Explicit CommonShare matching policy; never rewrite a delivery address.

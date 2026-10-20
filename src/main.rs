@@ -18,6 +18,7 @@ mod feedback;
 mod mail;
 mod provider;
 mod state;
+mod suppression_sync;
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
@@ -53,6 +54,8 @@ enum Command {
     Migrate,
     /// Import an exported JSON array of suppressions without docking
     ImportSuppressions(ImportArgs),
+    /// Merge the current AWS account/region suppression list into PostgreSQL
+    SyncSuppressions(SyncArgs),
 }
 
 #[derive(usage_rs::Args, Debug)]
@@ -60,6 +63,13 @@ struct ImportArgs {
     /// Path to the JSON export
     #[usage(long)]
     file: String,
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct SyncArgs {
+    /// Start a new full merge instead of resuming an interrupted token
+    #[usage(long)]
+    restart: bool,
 }
 
 #[tokio::main]
@@ -91,6 +101,13 @@ async fn main() -> anyhow::Result<()> {
         let records = serde_json::from_reader(std::fs::File::open(file)?)?;
         let count = store.import(records).await?;
         println!("{}", serde_json::json!({"imported": count}));
+        return Ok(());
+    }
+    if let Some(Command::SyncSuppressions(SyncArgs { restart })) = args.command {
+        let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+        let source = suppression_sync::AwsSuppressions::new(&aws).await?;
+        let report = suppression_sync::run(&source, &store, restart).await?;
+        println!("{}", serde_json::to_string(&report)?);
         return Ok(());
     }
 

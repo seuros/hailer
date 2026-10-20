@@ -599,7 +599,7 @@ version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "057e791c79cc08931d779c346585b966f851bf4040b41a0699796e4d65f6603c"
 dependencies = [
- "chrono-machines 0.9.0",
+ "chrono-machines",
  "hashbrown 0.17.1",
  "spin 0.12.3",
  "state-machines",
@@ -660,15 +660,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
-]
-
-[[package]]
-name = "chrono-machines"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c40d6419edc5f97c6bb185250d951e3b395b679e274ba2c6685b376d0da93faf"
-dependencies = [
- "rand",
 ]
 
 [[package]]
@@ -1214,9 +1205,10 @@ dependencies = [
  "aws-config",
  "aws-sdk-sesv2",
  "aws-sdk-sqs",
+ "aws-sdk-sts",
  "breaker-machines",
  "bytes",
- "chrono-machines 0.8.1",
+ "chrono-machines",
  "email_address",
  "jiff",
  "mothership-docking-protocol",

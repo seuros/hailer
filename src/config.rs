@@ -74,6 +74,18 @@ pub struct Config {
     #[serde(default = "default_pool_size")]
     pub database_pool_size: u32,
     pub feedback: Option<FeedbackConfig>,
+    pub suppression_sync: Option<SuppressionSyncConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuppressionSyncConfig {
+    #[serde(default = "default_sync_interval")]
+    pub interval_seconds: u64,
+}
+
+const fn default_sync_interval() -> u64 {
+    3600
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,7 +105,12 @@ const fn default_threads() -> u16 {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { threads: default_threads(), database_pool_size: default_pool_size(), feedback: None }
+        Self {
+            threads: default_threads(),
+            database_pool_size: default_pool_size(),
+            feedback: None,
+            suppression_sync: None,
+        }
     }
 }
 
@@ -115,6 +132,16 @@ impl Config {
         }
         if !(1..=64).contains(&self.database_pool_size) {
             return Err(ConfigError::InvalidConfig("database_pool_size", "must be in 1..64"));
+        }
+        if self
+            .suppression_sync
+            .as_ref()
+            .is_some_and(|config| !(60..=86_400).contains(&config.interval_seconds))
+        {
+            return Err(ConfigError::InvalidConfig(
+                "suppression_sync.interval_seconds",
+                "must be in 60..86400",
+            ));
         }
         if let Some(feedback) = &self.feedback {
             if !feedback.queue_url.starts_with("https://") {
