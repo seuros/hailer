@@ -254,20 +254,21 @@ and offline suppression import before attaching either Linux gem to the
 existing release. Existing gem assets are never overwritten; `SHA256SUMS` is
 updated to cover all release gems.
 
-Publishing a GitHub release does **not** publish to RubyGems. Download and
-verify the release assets, then push each platform separately:
+Publishing a GitHub release does **not** publish to RubyGems. Like Shuttlebay,
+release assets can be fetched and published with Rake:
 
 ```sh
-mkdir -p pkg/publish
-gh release download v0.1.0 --repo seuros/hailer --dir pkg/publish \
-  --pattern '*.gem' --pattern SHA256SUMS
-cd pkg/publish
-shasum -a 256 -c SHA256SUMS
-gem push hailer-0.1.0.gem --host https://rubygems.org
-gem push hailer-0.1.0-arm64-darwin.gem --host https://rubygems.org
-gem push hailer-0.1.0-x86_64-linux-gnu.gem --host https://rubygems.org
-gem push hailer-0.1.0-aarch64-linux-gnu.gem --host https://rubygems.org
+bundle exec rake gems:fetch
+bundle exec rake gems:push_all
+# Or select an explicit release:
+bundle exec rake 'gems:push_all[v0.1.0]'
 ```
+
+`gems:push_all` fetches fresh assets, checks every archive's SHA-256,
+name/version/platform, and publishes only that verified set. It skips
+already-published platforms only when RubyGems reports the identical archive
+hash, so an interrupted publication can be resumed without replacing artifacts.
+`gems:push` is an alias. No release task rebuilds or silently republishes gems.
 
 RubyGems may require MFA or a suitably scoped API key. Keep credentials out of
 the repository. Publishing makes the packaged Ruby code and binaries public,
