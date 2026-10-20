@@ -75,6 +75,14 @@ pub struct Config {
     pub database_pool_size: u32,
     pub feedback: Option<FeedbackConfig>,
     pub suppression_sync: Option<SuppressionSyncConfig>,
+    pub rate_limit: Option<RateLimitConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitConfig {
+    pub recipients_per_second: f64,
+    pub burst: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,6 +118,7 @@ impl Default for Config {
             database_pool_size: default_pool_size(),
             feedback: None,
             suppression_sync: None,
+            rate_limit: None,
         }
     }
 }
@@ -132,6 +141,14 @@ impl Config {
         }
         if !(1..=64).contains(&self.database_pool_size) {
             return Err(ConfigError::InvalidConfig("database_pool_size", "must be in 1..64"));
+        }
+        if self.rate_limit.as_ref().is_some_and(|rate| {
+            !rate.recipients_per_second.is_finite()
+                || rate.recipients_per_second <= 0.0
+                || rate.recipients_per_second > 1_000_000.0
+                || !(1..=100_000).contains(&rate.burst)
+        }) {
+            return Err(ConfigError::InvalidConfig("rate_limit", "invalid rate or burst"));
         }
         if self
             .suppression_sync

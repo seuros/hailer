@@ -13,12 +13,13 @@ use thiserror::Error;
 
 use crate::mail::SendRequest;
 
-/// Why a send failed, coarse enough for the Ruby side to decide whether to
-/// retry (`Transport`) or give up (`InvalidAddress`/`Rejected`).
+/// A failure is not a promise that retrying a send is safe.
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    #[error("invalid recipient address: {0}")]
+    #[error("invalid recipient address")]
     InvalidAddress(String),
+    #[error("invalid message or envelope")]
+    InvalidRequest,
     #[error("no recipients")]
     NoRecipients,
     #[error("all recipients are suppressed")]
@@ -27,6 +28,36 @@ pub enum ProviderError {
     Rejected(String),
     #[error("provider call failed: {0}")]
     Transport(String),
+    #[error("provider outcome unknown; do not automatically retry")]
+    Ambiguous,
+    #[error("local recipient rate limit exceeded")]
+    RateLimited,
+}
+
+impl ProviderError {
+    pub const fn status(&self) -> u16 {
+        match self {
+            Self::InvalidAddress(_)
+            | Self::InvalidRequest
+            | Self::NoRecipients
+            | Self::Suppressed => 422,
+            Self::Rejected(_) => 502,
+            Self::Transport(_) | Self::Ambiguous => 503,
+            Self::RateLimited => 429,
+        }
+    }
+
+    pub const fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::Ambiguous => Some("outcome_unknown"),
+            Self::RateLimited => Some("rate_limited"),
+            _ => None,
+        }
+    }
+
+    pub const fn counts_as_failure(&self) -> bool {
+        matches!(self, Self::Transport(_) | Self::Ambiguous)
+    }
 }
 
 /// A backend that can hand a fully-rendered raw MIME message to a real mail
@@ -34,4 +65,8 @@ pub enum ProviderError {
 #[async_trait]
 pub trait MailProvider: Send + Sync {
     async fn send(&self, request: &SendRequest) -> Result<String, ProviderError>;
+
+    fn circuit_state(&self) -> &'static str {
+        "unreported"
+    }
 }

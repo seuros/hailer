@@ -21,4 +21,7 @@ module Hailer
   class ValidationError < DeliveryError; end
   class RejectedError < DeliveryError; end
   class UnavailableError < DeliveryError; end
+  class RateLimitedError < DeliveryError; end
+  # SES might have accepted the message. Automatic retries can duplicate it.
+  class AmbiguousDeliveryError < DeliveryError; end
 end

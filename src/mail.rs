@@ -28,6 +28,32 @@ pub struct SendRequest {
 }
 
 impl SendRequest {
+    pub fn validate(&self) -> Result<(), crate::provider::ProviderError> {
+        use crate::provider::ProviderError;
+        if self.raw_mime.trim().is_empty() || self.raw_mime.len() > 40 * 1024 * 1024 {
+            return Err(ProviderError::InvalidRequest);
+        }
+        if let Some(from) = &self.from_email_address
+            && !email_address::EmailAddress::is_valid(from)
+        {
+            return Err(ProviderError::InvalidAddress(from.clone()));
+        }
+        let mut count = 0;
+        for address in self.recipients() {
+            if !email_address::EmailAddress::is_valid(address) {
+                return Err(ProviderError::InvalidAddress(address.to_owned()));
+            }
+            count += 1;
+        }
+        if count == 0 {
+            return Err(ProviderError::NoRecipients);
+        }
+        if count > 50 {
+            return Err(ProviderError::InvalidRequest);
+        }
+        Ok(())
+    }
+
     /// Every recipient address across to/cc/bcc, for boundary validation.
     pub fn recipients(&self) -> impl Iterator<Item = &str> {
         self.to_addresses
@@ -49,4 +75,6 @@ pub struct SendResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct SendErrorBody {
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
 }

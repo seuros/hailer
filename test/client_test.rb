@@ -20,6 +20,7 @@ class ClientTest < Minitest::Test
     {
       400 => Hailer::ValidationError,
       422 => Hailer::ValidationError,
+      429 => Hailer::RateLimitedError,
       502 => Hailer::RejectedError,
       503 => Hailer::UnavailableError,
       404 => Hailer::DeliveryError,
@@ -36,6 +37,13 @@ class ClientTest < Minitest::Test
   def test_does_not_treat_other_success_statuses_as_delivery_acceptance
     with_server(status: 202, body: '{"message_id":"not-accepted-by-ses"}') do |server|
       assert_raises(Hailer::DeliveryError) { client(server).deliver({}) }
+    end
+  end
+
+  def test_an_ambiguous_ses_outcome_is_distinct_from_an_unavailable_service
+    with_server(status: 503, body: '{"error":"provider outcome unknown","code":"outcome_unknown"}') do |server|
+      error = assert_raises(Hailer::AmbiguousDeliveryError) { client(server).deliver({}) }
+      assert_equal 503, error.status
     end
   end
 

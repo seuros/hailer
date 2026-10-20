@@ -10,7 +10,7 @@ module Hailer
     DEFAULTS = { open_timeout: 5, read_timeout: 30, write_timeout: 30 }.freeze
     MAX_RESPONSE_BYTES = 65_536
     HTTP_ERRORS = {
-      400 => ValidationError, 422 => ValidationError,
+      400 => ValidationError, 422 => ValidationError, 429 => RateLimitedError,
       502 => RejectedError, 503 => UnavailableError
     }.freeze
 
@@ -72,6 +72,9 @@ module Hailer
       unless status == 200
         message = document['error']
         message = "Hailer returned HTTP #{status}" unless message.is_a?(String) && !message.empty?
+        if status == 503 && document['code'] == 'outcome_unknown'
+          raise AmbiguousDeliveryError.new(message, status: status)
+        end
         raise HTTP_ERRORS.fetch(status, DeliveryError).new(message, status: status)
       end
       document

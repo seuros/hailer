@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use crate::bay::reader::next_frame;
 use crate::mail::{SendErrorBody, SendRequest, SendResponse};
-use crate::provider::{MailProvider, ProviderError};
+use crate::provider::MailProvider;
 use crate::state::Store;
 
 /// Private send and provider-neutral feedback feed routes.
@@ -149,21 +149,17 @@ async fn handle(
             (200, serde_json::to_vec(&response).unwrap_or_default())
         }
         Err(error) => {
-            warn!(%error, "send failed");
-            let status = match error {
-                ProviderError::InvalidAddress(_)
-                | ProviderError::NoRecipients
-                | ProviderError::Suppressed => 422,
-                ProviderError::Rejected(_) => 502,
-                ProviderError::Transport(_) => 503,
-            };
-            (status, error_body(&error.to_string()))
+            let status = error.status();
+            warn!(status, "send failed");
+            let body = SendErrorBody { error: error.to_string(), code: error.code() };
+            (status, serde_json::to_vec(&body).unwrap_or_default())
         }
     }
 }
 
 fn error_body(message: &str) -> Vec<u8> {
-    serde_json::to_vec(&SendErrorBody { error: message.to_string() }).unwrap_or_default()
+    serde_json::to_vec(&SendErrorBody { error: message.to_string(), code: None })
+        .unwrap_or_default()
 }
 
 async fn write_reply<S: AsyncWrite + Unpin>(

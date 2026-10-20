@@ -7,6 +7,7 @@ use serde_json::Value;
 use tokio::io::{DuplexStream, duplex};
 
 use super::*;
+use crate::provider::ProviderError;
 
 const RUBY_REQUEST: &[u8] = include_bytes!("../../../test/fixtures/send_request.json");
 
@@ -18,6 +19,8 @@ enum Outcome {
     Suppressed,
     Rejected,
     Unavailable,
+    Ambiguous,
+    RateLimited,
 }
 
 struct FakeProvider {
@@ -42,6 +45,8 @@ impl MailProvider for FakeProvider {
             Outcome::Suppressed => Err(ProviderError::Suppressed),
             Outcome::Rejected => Err(ProviderError::Rejected("message rejected".into())),
             Outcome::Unavailable => Err(ProviderError::Transport("circuit open".into())),
+            Outcome::Ambiguous => Err(ProviderError::Ambiguous),
+            Outcome::RateLimited => Err(ProviderError::RateLimited),
         }
     }
 }
@@ -100,6 +105,8 @@ async fn provider_failures_use_the_statuses_the_gem_understands() {
         (Outcome::Suppressed, 422),
         (Outcome::Rejected, 502),
         (Outcome::Unavailable, 503),
+        (Outcome::Ambiguous, 503),
+        (Outcome::RateLimited, 429),
     ] {
         let provider: Arc<dyn MailProvider> = FakeProvider::new(outcome);
         let (status, body) = handle(b"POST", SEND_PATH.as_bytes(), RUBY_REQUEST, &provider).await;

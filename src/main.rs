@@ -14,6 +14,7 @@
 
 mod bay;
 mod config;
+mod control;
 mod feedback;
 mod mail;
 mod provider;
@@ -128,9 +129,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let control = Arc::new(control::Control::new(
+        config.rate_limit.as_ref(),
+        config.suppression_sync.is_none(),
+    )?);
     let provider: Arc<dyn MailProvider> = Arc::new(SuppressionGuard {
         inner: Arc::new(SesProvider::new(&aws)),
         store: store.clone(),
+        control,
     });
     let feedback_store = store.clone();
     let feedback = async {
