@@ -1,0 +1,8 @@
+# Keep this file and its state volume private. One Hailer process owns this file.
+state_path = "/var/lib/hailer/state.redb"
+threads = 2
+
+[feedback]
+# Dedicated queue; subscribe the SNS topic with RawMessageDelivery=false.
+queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/hailer-feedback"
+topic_arn = "arn:aws:sns:us-east-1:123456789012:mail-feedback"

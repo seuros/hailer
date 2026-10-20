@@ -1,0 +1,175 @@
+//! Hailer CLI/bootstrap.
+//!
+//! Hailer's HTTP ingress docks with Mothership as an HTTP bay
+//! (`[[bays.http]]`) and answers private send/event requests over the Hangar
+//! protocol (`bay.rs`). There is no standalone HTTP listener — unlike
+//! orbitcast, which can also run without Mothership, hailer always runs
+//! under a supervisor that exported `MS_PID`/`MS_SHIP`/`MS_SOCKET_DIR`.
+//!
+//! # Shutdown
+//!
+//! Feedback is committed before SQS acknowledgement. Interrupted/unacknowledged
+//! receipts are retried by SQS. In-flight sends still have ambiguous outcomes
+//! on shutdown; the send path does not yet provide graceful draining.
+
+mod bay;
+mod config;
+mod feedback;
+mod mail;
+mod provider;
+mod state;
+
+use std::sync::Arc;
+
+use provider::MailProvider;
+use provider::guard::SuppressionGuard;
+use provider::ses::SesProvider;
+use tracing::{error, info, warn};
+
+use crate::config::{Config, DockingConfig};
+
+#[derive(usage_rs::Cli, Debug)]
+#[usage(name = "hailer")]
+#[usage(about = "Outbound mail delivery ship for Mothership: SES sender with pluggable backends")]
+#[usage(version)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+struct Args {
+    /// Log level (trace, debug, info, warn, error)
+    #[usage(short, long, global, env = "HAILER_LOG", default = "info")]
+    log_level: String,
+    /// Path to the TOML config file (optional; defaults apply when absent)
+    #[usage(long, env = "HAILER_CONFIG")]
+    config: Option<String>,
+    /// Durable state file, overriding the TOML setting
+    #[usage(long, global, env = "HAILER_STATE_PATH")]
+    state_path: Option<String>,
+    #[usage(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(usage_rs::Subcommands, Debug)]
+enum Command {
+    /// Import an exported JSON array of suppressions (stop the service first)
+    ImportSuppressions(ImportArgs),
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct ImportArgs {
+    /// Path to the JSON export
+    #[usage(long)]
+    file: String,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    tracing_subscriber::fmt()
+        .json()
+        .with_writer(std::io::stderr)
+        .with_env_filter(&args.log_level)
+        .init();
+    info!("hailer v{}", env!("CARGO_PKG_VERSION"));
+
+    let config_path = std::path::Path::new(args.config.as_deref().unwrap_or("hailer.toml"));
+    anyhow::ensure!(
+        args.config.is_none() || config_path.exists(),
+        "specified config file is missing"
+    );
+    let mut config = Config::load(config_path)?;
+    if let Some(path) = args.state_path {
+        config.state_path = path.into();
+    }
+    config.validate()?;
+    let state_path = config.state_path.clone();
+    let store = tokio::task::spawn_blocking(move || state::Store::open(&state_path)).await??;
+    if let Some(Command::ImportSuppressions(ImportArgs { file })) = args.command {
+        let count = tokio::task::spawn_blocking(move || {
+            let records = serde_json::from_reader(std::fs::File::open(file)?)?;
+            store.import(records)
+        })
+        .await??;
+        println!("{}", serde_json::json!({"imported": count}));
+        return Ok(());
+    }
+
+    let docking = DockingConfig::from_env().map_err(|error| {
+        error!(%error, "hailer must run under Mothership (MS_PID, MS_SHIP, MS_SOCKET_DIR)");
+        anyhow::anyhow!(error)
+    })?;
+
+    if docking.mothership_pid == 0 {
+        warn!("MS_PID reported 0; Mothership liveness cannot be checked");
+    }
+
+    info!(
+        ship = %docking.ship_name,
+        socket = %docking.socket_path().display(),
+        threads = config.threads,
+        "Starting hailer"
+    );
+
+    let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let provider: Arc<dyn MailProvider> = Arc::new(SuppressionGuard {
+        inner: Arc::new(SesProvider::new(&aws)),
+        store: store.clone(),
+    });
+    let feedback_store = store.clone();
+    let feedback = async {
+        if let Some(feedback_config) = &config.feedback {
+            let queue = feedback::AwsQueue::new(&aws, feedback_config.queue_url.clone());
+            feedback::run(&queue, feedback_store, feedback_config).await
+        } else {
+            warn!("Feedback ingestion disabled; only previously stored suppressions are enforced");
+            std::future::pending::<anyhow::Result<()>>().await
+        }
+    };
+
+    tokio::select! {
+        result = bay::serve(docking, provider, store) => {
+            if let Err(error) = result {
+                error!(%error, "Docking transport failed");
+                return Err(error);
+            }
+        }
+        result = feedback => result?,
+        () = wait_for_signal() => {
+            info!("Shutdown signal received");
+        }
+    }
+
+    info!("hailer stopped");
+    Ok(())
+}
+
+/// Resolve on SIGTERM or ctrl-c.
+async fn wait_for_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(error) => {
+                warn!(%error, "Cannot listen for SIGTERM; ctrl-c only");
+                ctrl_c().await;
+                return;
+            }
+        };
+
+        tokio::select! {
+            _ = term.recv() => info!("SIGTERM received"),
+            () = ctrl_c() => info!("Interrupt received"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c().await;
+}
+
+async fn ctrl_c() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        error!(%error, "Cannot listen for ctrl-c; an interrupt will not be handled");
+        std::future::pending::<()>().await;
+    }
+}

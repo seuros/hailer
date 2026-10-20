@@ -1,0 +1,15 @@
+[
+  {
+    "email_address": "BOUNCED+alias@example.com",
+    "reason": "bounce",
+    "suppressed_at": "2026-10-19T12:00:00Z",
+    "originating_message_id": "<old-message@example.com>",
+    "metadata": {"bounce_type": "Permanent"}
+  },
+  {
+    "email_address": "complained@example.com",
+    "reason": "complaint",
+    "suppressed_at": "2026-10-19T13:00:00Z",
+    "metadata": {}
+  }
+]

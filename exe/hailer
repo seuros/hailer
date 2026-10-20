@@ -1,0 +1,11 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'hailer/binary'
+
+begin
+  exec Hailer::Binary.path, *ARGV
+rescue Hailer::Error => error
+  warn error.message
+  exit 1
+end

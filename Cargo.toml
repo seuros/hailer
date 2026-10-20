@@ -1,0 +1,104 @@
+# Standalone workspace root. Hailer lives inside the Atlas Monkey Fleet
+# checkout but docks with mothership and ships on its own: an empty
+# `[workspace]` table opts this crate out of the parent workspace, so a
+# fresh clone of this repository builds with its own resolution, its own
+# lockfile, and its own release profile (build isolation). The fleet root
+# lists it under `exclude`, not `members`.
+[workspace]
+
+[package]
+name = "hailer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+authors = ["Abdelkader Boudih <oss@seuros.com>"]
+description = "Outbound mail delivery ship for Mothership: SES sender with pluggable backends"
+license = "BSD-3-Clause"
+repository = "https://github.com/seuros/hailer"
+
+[[bin]]
+name = "hailer"
+path = "src/main.rs"
+
+[dependencies]
+# Core async runtime
+tokio = { version = "1.53", features = ["full", "signal"] }
+
+# Docking protocol (frame types + HTTP-bay codec; no client helper, hailer
+# writes its own Dock/Moored handshake + Hail/Haul/Reply loop in src/bay/)
+mothership-docking-protocol = "0.3.0"
+
+# AWS SES (SESv2 unified send_email, EmailContent::Raw for raw MIME) and its
+# credential chain
+aws-sdk-sesv2 = "1.140"
+aws-config = "1.12"
+
+# SES feedback arrives through a private SQS queue subscribed to SNS.
+aws-sdk-sqs = "1.114"
+
+# Atomic, durable feedback deduplication, event history, and suppressions.
+redb = "4.3"
+
+# Recipient address validation at the boundary. `emval` was tried first (per
+# the dependency research) but turned out to be a Python-extension-first
+# crate (hard pyo3 + polars dependency, no way to opt out) that fails to
+# link as a plain Rust dependency; `email_address` is a plain, dependency-light
+# RFC 5322 checker, update cadence stalled since 2024 but address syntax does
+# not change, and it actually links.
+email_address = { version = "0.2", default-features = false }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Docking link read-buffer management (bay.rs frame reader)
+bytes = "1"
+
+# MailProvider trait object + async fns in traits
+async-trait = "0.1"
+
+# Configuration
+toml = "1.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+usage-rs = "7.0.0"
+
+# Errors
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Wall-clock time (fleet convention); monotonic timers stay on tokio/std.
+jiff = { version = "0.2.38", default-features = false, features = ["std"] }
+
+# Resilience (fleet convention). SES's SDK has its own retry; these own
+# backoff/circuit-breaking/rate-limiting instead so hailer's send path
+# behaves like the rest of the fleet, not like the AWS SDK defaults.
+breaker-machines = { version = "0.20.0", features = ["async"] }
+chrono-machines = "0.8.1"
+throttle-machines = "0.3.0"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "warn"
+dead_code_pub_in_binary = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Release settings are owned by this repository rather than inherited from
+# the fleet workspace: released binaries must not depend on a parent
+# profile. Legal here because this manifest is its own workspace root.
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
