@@ -234,8 +234,43 @@ manifest before `exec`, preserving arguments, exit status, and signal handling.
 `HAILER_BINARY` is an explicit, version-checked source-build override; there is
 no download or PATH fallback.
 
-Build on each supported release host before publishing its artifact. Only
-`arm64-darwin` has been built and exercised in this checkout. Linux GNU builds
-must use your intended minimum-glibc build environment; a native build on a
-newer distro is not automatically portable to older distributions. Nothing in
-the packaging task publishes a gem.
+Build on each supported release host before publishing its artifact. Nothing
+in the packaging task publishes a gem.
+
+## Linux releases and RubyGems
+
+The **Linux binary gems** GitHub Actions workflow builds `x86_64-linux-gnu`
+and `aarch64-linux-gnu` natively against Debian 12 (glibc 2.36). These artifacts
+require glibc 2.36 or newer; they are not Alpine/musl builds.
+
+```sh
+gh workflow run linux-gems.yml --repo seuros/hailer -f tag=v0.1.0
+```
+
+The workflow checks out the requested release tag, runs the Ruby and Rust
+suites, and installs each binary gem in a separate slim Debian container.
+It verifies the installed platform, bundled-binary manifest, executable version,
+and offline suppression import before attaching either Linux gem to the
+existing release. Existing gem assets are never overwritten; `SHA256SUMS` is
+updated to cover all release gems.
+
+Publishing a GitHub release does **not** publish to RubyGems. Download and
+verify the release assets, then push each platform separately:
+
+```sh
+mkdir -p pkg/publish
+gh release download v0.1.0 --repo seuros/hailer --dir pkg/publish \
+  --pattern '*.gem' --pattern SHA256SUMS
+cd pkg/publish
+shasum -a 256 -c SHA256SUMS
+gem push hailer-0.1.0.gem --host https://rubygems.org
+gem push hailer-0.1.0-arm64-darwin.gem --host https://rubygems.org
+gem push hailer-0.1.0-x86_64-linux-gnu.gem --host https://rubygems.org
+gem push hailer-0.1.0-aarch64-linux-gnu.gem --host https://rubygems.org
+```
+
+RubyGems may require MFA or a suitably scoped API key. Keep credentials out of
+the repository. Publishing makes the packaged Ruby code and binaries public,
+even when the GitHub repository is private. Once published, Bundler selects
+the matching native gem; do not set `force_ruby_platform` in deployment if
+you want the bundled executable.
