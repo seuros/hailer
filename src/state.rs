@@ -1,28 +1,27 @@
-//! A feedback event, its deduplication key, and its suppressions commit together.
-//! Never delete an SQS message before this durable transaction succeeds.
+//! Hailer owns its PostgreSQL schema. Feedback and its deduplication key commit
+//! with suppression changes before acknowledging SQS.
 
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashSet;
-use std::ops::Bound::{Excluded, Unbounded};
-use std::path::Path;
-use std::sync::Arc;
+use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::{Context, ensure};
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::types::Json;
+use sqlx::{ConnectOptions, PgPool, Postgres, Row, Transaction};
 
 use crate::feedback::{FeedbackEvent, SuppressionReason};
 
-const EVENTS: TableDefinition<u64, &str> = TableDefinition::new("feedback_v1");
-const SEEN: TableDefinition<&str, u64> = TableDefinition::new("feedback_seen_v1");
-const SUPPRESSIONS: TableDefinition<&str, &str> = TableDefinition::new("suppressions_v1");
-
 #[derive(Clone)]
-pub struct Store(Arc<Database>);
+pub struct Store {
+    pub(crate) pool: PgPool,
+}
 
-/// Also the import format. Extra `ActiveRecord` export fields are ignored.
+/// Also the JSON import format. Extra application export fields are ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Suppression {
     pub email_address: String,
@@ -47,114 +46,141 @@ pub struct EventPage {
 }
 
 impl Store {
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)?;
-        }
-        let database = Database::create(path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        let transaction = database.begin_write()?;
-        transaction.open_table(EVENTS)?;
-        transaction.open_table(SEEN)?;
-        transaction.open_table(SUPPRESSIONS)?;
-        transaction.commit()?;
-        Ok(Self(Arc::new(database)))
+    pub async fn connect(url: &str, max_connections: u32) -> anyhow::Result<Self> {
+        ensure!((1..=64).contains(&max_connections), "database pool must be in 1..64");
+        let options = PgConnectOptions::from_str(url)
+            .map_err(|_| anyhow::anyhow!("invalid HAILER_DATABASE_URL"))?
+            .application_name("hailer")
+            .options([
+                ("search_path", "hailer,public"),
+                ("statement_timeout", "10000"),
+                ("lock_timeout", "5000"),
+            ])
+            .disable_statement_logging();
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_with(options)
+            .await
+            .map_err(|_| anyhow::anyhow!("PostgreSQL connection unavailable"))?;
+        let mut bootstrap = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(1751214437, 1)").execute(&mut *bootstrap).await?;
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS hailer").execute(&mut *bootstrap).await?;
+        bootstrap.commit().await?;
+        // With search_path set above, the migrator's tracking table belongs to
+        // hailer too, not a Rails application's public schema.
+        sqlx::migrate!().run(&pool).await?;
+        Ok(Self { pool })
     }
 
-    /// False means a previously committed event was redelivered.
-    pub fn record(&self, event: &FeedbackEvent) -> anyhow::Result<bool> {
-        let mut transaction = self.0.begin_write()?;
-        transaction.set_durability(Durability::Immediate)?;
-        {
-            let mut seen = transaction.open_table(SEEN)?;
-            if seen.get(event.event_id.as_str())?.is_some() {
-                return Ok(false);
-            }
-            let mut events = transaction.open_table(EVENTS)?;
-            let sequence = events
-                .last()?
-                .map_or(0, |(key, _)| key.value())
-                .checked_add(1)
-                .context("event sequence exhausted")?;
-            events.insert(sequence, serde_json::to_string(event)?.as_str())?;
-            if let Some(reason) = event.suppression {
-                let mut suppressions = transaction.open_table(SUPPRESSIONS)?;
-                for address in &event.recipients {
-                    let record = Suppression {
-                        email_address: normalize(address)?,
-                        reason,
-                        suppressed_at: event.occurred_at.clone(),
-                        originating_message_id: event.message_id.clone(),
-                        source_event_id: Some(event.event_id.clone()),
-                        metadata: serde_json::Value::Null,
-                    };
-                    merge(&mut suppressions, record)?;
-                }
-            }
-            seen.insert(event.event_id.as_str(), sequence)?;
+    pub async fn healthy(&self) -> bool {
+        matches!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&self.pool)
+            )
+            .await,
+            Ok(Ok(1))
+        )
+    }
+
+    /// Every state writer takes the same lock. Allocation remains locked until
+    /// COMMIT: a later committed event can never hide an earlier pending one.
+    pub(crate) async fn write(&self) -> anyhow::Result<Transaction<'_, Postgres>> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT value FROM hailer.event_counter WHERE id = 1 FOR UPDATE")
+            .execute(&mut *transaction)
+            .await?;
+        Ok(transaction)
+    }
+
+    /// False means an already committed SNS event was redelivered.
+    pub async fn record(&self, event: &FeedbackEvent) -> anyhow::Result<bool> {
+        ensure!(!event.event_id.is_empty(), "missing event id");
+        let records = event
+            .suppression
+            .map(|reason| {
+                event
+                    .recipients
+                    .iter()
+                    .map(|address| {
+                        validate(Suppression {
+                            email_address: address.clone(),
+                            reason,
+                            suppressed_at: event.occurred_at.clone(),
+                            originating_message_id: event.message_id.clone(),
+                            source_event_id: Some(event.event_id.clone()),
+                            metadata: serde_json::Value::Null,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let mut transaction = self.write().await?;
+        let duplicate: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM hailer.events WHERE event_id = $1)")
+                .bind(&event.event_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if duplicate {
+            transaction.rollback().await?;
+            return Ok(false);
         }
-        transaction.commit()?;
+        let sequence: i64 = sqlx::query_scalar(
+            "UPDATE hailer.event_counter SET value = value + 1 WHERE id = 1 RETURNING value",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        sqlx::query("INSERT INTO hailer.events(sequence, event_id, payload) VALUES ($1, $2, $3)")
+            .bind(sequence)
+            .bind(&event.event_id)
+            .bind(Json(event))
+            .execute(&mut *transaction)
+            .await?;
+        merge_all(&mut transaction, &records).await?;
+        transaction.commit().await?;
         Ok(true)
     }
 
-    /// Validate the entire batch first. A bad export must not partially import.
-    pub fn import(&self, records: Vec<Suppression>) -> anyhow::Result<usize> {
-        let records = records
-            .into_iter()
-            .map(|mut record| {
-                record.email_address = normalize(&record.email_address)?;
-                record.suppressed_at = record
-                    .suppressed_at
-                    .parse::<jiff::Timestamp>()
-                    .context("invalid suppression timestamp")?
-                    .to_string();
-                Ok(record)
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let mut transaction = self.0.begin_write()?;
-        transaction.set_durability(Durability::Immediate)?;
-        {
-            let mut table = transaction.open_table(SUPPRESSIONS)?;
-            for record in &records {
-                merge(&mut table, record.clone())?;
-            }
-        }
-        transaction.commit()?;
+    /// Validate the complete export before opening its atomic import transaction.
+    pub async fn import(&self, records: Vec<Suppression>) -> anyhow::Result<usize> {
+        let records = records.into_iter().map(validate).collect::<anyhow::Result<Vec<_>>>()?;
+        let mut transaction = self.write().await?;
+        merge_all(&mut transaction, &records).await?;
+        transaction.commit().await?;
         Ok(records.len())
     }
 
-    pub fn blocked(&self, addresses: &[String]) -> anyhow::Result<HashSet<String>> {
-        let transaction = self.0.begin_read()?;
-        let table = transaction.open_table(SUPPRESSIONS)?;
-        let mut blocked = HashSet::new();
-        for address in addresses {
-            // Invalid addresses are rejected by the provider, never repaired.
-            if let Ok(key) = normalize(address)
-                && table.get(key.as_str())?.is_some()
-            {
-                blocked.insert(key);
-            }
-        }
-        Ok(blocked)
+    pub async fn blocked(&self, addresses: &[String]) -> anyhow::Result<HashSet<String>> {
+        let keys: Vec<_> = addresses.iter().filter_map(|address| normalize(address).ok()).collect();
+        // One indexed, bounded-envelope query rather than loading the list.
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT email_address FROM hailer.suppressions WHERE email_address = ANY($1)",
+        )
+        .bind(keys)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect())
     }
 
-    pub fn events(&self, after: u64, limit: usize) -> anyhow::Result<EventPage> {
+    pub async fn events(&self, after: u64, limit: usize) -> anyhow::Result<EventPage> {
         ensure!((1..=100).contains(&limit), "event page limit must be 1..100");
-        let transaction = self.0.begin_read()?;
-        let table = transaction.open_table(EVENTS)?;
-        let events = table
-            .range((Excluded(after), Unbounded))?
-            .take(limit)
-            .map(|entry| {
-                let (key, value) = entry?;
-                Ok(StoredEvent {
-                    sequence: key.value(),
-                    event: serde_json::from_str(value.value())?,
-                })
+        let after_sql = i64::try_from(after).context("cursor exceeds supported range")?;
+        let rows = sqlx::query(
+            "SELECT sequence, payload FROM hailer.events WHERE sequence > $1 ORDER BY sequence LIMIT $2",
+        )
+        .bind(after_sql)
+        .bind(i64::try_from(limit)?)
+        .fetch_all(&self.pool)
+        .await?;
+        let events = rows
+            .into_iter()
+            .map(|row| {
+                let sequence: i64 = row.try_get("sequence")?;
+                let Json(event): Json<FeedbackEvent> = row.try_get("payload")?;
+                Ok(StoredEvent { sequence: u64::try_from(sequence)?, event })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let next_cursor = events.last().map_or(after, |event| event.sequence);
@@ -162,37 +188,57 @@ impl Store {
     }
 }
 
-fn merge(table: &mut redb::Table<&str, &str>, mut incoming: Suppression) -> anyhow::Result<()> {
-    let existing = table
-        .get(incoming.email_address.as_str())?
-        .map(|value| serde_json::from_str::<Suppression>(value.value()))
-        .transpose()?;
-    if let Some(existing) = existing {
-        // Neither an old bounce nor an import can downgrade a complaint.
-        if existing.reason == SuppressionReason::Complaint {
-            return Ok(());
-        }
-        if existing.suppressed_at.parse::<jiff::Timestamp>()?
-            < incoming.suppressed_at.parse::<jiff::Timestamp>()?
-        {
-            incoming.suppressed_at = existing.suppressed_at;
-        }
-        if incoming.metadata.is_null() {
-            incoming.metadata = existing.metadata;
-        }
+pub(crate) fn validate(mut record: Suppression) -> anyhow::Result<Suppression> {
+    record.email_address = normalize(&record.email_address)?;
+    record.suppressed_at = record
+        .suppressed_at
+        .parse::<jiff::Timestamp>()
+        .context("invalid suppression timestamp")?
+        .to_string();
+    Ok(record)
+}
+
+pub(crate) async fn merge_all(
+    transaction: &mut Transaction<'_, Postgres>,
+    records: &[Suppression],
+) -> anyhow::Result<()> {
+    for record in records {
+        let reason = match record.reason {
+            SuppressionReason::Bounce => "bounce",
+            SuppressionReason::Complaint => "complaint",
+        };
+        sqlx::query(
+            "INSERT INTO hailer.suppressions AS current \
+                (email_address, reason, suppressed_at, originating_message_id, source_event_id, metadata) \
+             VALUES ($1, $2, $3::text::timestamptz, $4, $5, $6) \
+             ON CONFLICT (email_address) DO UPDATE SET \
+                reason = EXCLUDED.reason, \
+                suppressed_at = LEAST(current.suppressed_at, EXCLUDED.suppressed_at), \
+                originating_message_id = EXCLUDED.originating_message_id, \
+                source_event_id = EXCLUDED.source_event_id, \
+                metadata = CASE WHEN EXCLUDED.metadata = 'null'::jsonb \
+                    THEN current.metadata ELSE EXCLUDED.metadata END \
+             WHERE current.reason <> 'complaint'",
+        )
+        .bind(&record.email_address)
+        .bind(reason)
+        .bind(&record.suppressed_at)
+        .bind(&record.originating_message_id)
+        .bind(&record.source_event_id)
+        .bind(Json(&record.metadata))
+        .execute(&mut **transaction)
+        .await?;
     }
-    table.insert(incoming.email_address.as_str(), serde_json::to_string(&incoming)?.as_str())?;
     Ok(())
 }
 
-/// Preserve `CommonShare`'s existing suppression matching: case-insensitive and
-/// plus aliases share a key. This never rewrites the actual delivery address.
+/// Explicit CommonShare matching policy; never rewrite a delivery address.
 pub fn normalize(address: &str) -> anyhow::Result<String> {
     let address = address.trim().to_ascii_lowercase();
-    let parsed =
-        address.parse::<email_address::EmailAddress>().context("invalid suppression address")?;
+    let parsed = address
+        .parse::<email_address::EmailAddress>()
+        .map_err(|_| anyhow::anyhow!("invalid suppression address"))?;
     let local = parsed.local_part();
-    // Quoted local parts are literal mailboxes, not plus-address aliases.
     let local = if local.starts_with('"') {
         local
     } else {

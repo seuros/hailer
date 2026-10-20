@@ -71,8 +71,8 @@ pub struct Config {
     /// up as unused or refused links, so it's worth getting right.
     #[serde(default = "default_threads")]
     pub threads: u16,
-    #[serde(default = "default_state_path")]
-    pub state_path: PathBuf,
+    #[serde(default = "default_pool_size")]
+    pub database_pool_size: u32,
     pub feedback: Option<FeedbackConfig>,
 }
 
@@ -83,8 +83,8 @@ pub struct FeedbackConfig {
     pub topic_arn: String,
 }
 
-fn default_state_path() -> PathBuf {
-    PathBuf::from("data/hailer.redb")
+const fn default_pool_size() -> u32 {
+    5
 }
 
 const fn default_threads() -> u16 {
@@ -93,7 +93,7 @@ const fn default_threads() -> u16 {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { threads: default_threads(), state_path: default_state_path(), feedback: None }
+        Self { threads: default_threads(), database_pool_size: default_pool_size(), feedback: None }
     }
 }
 
@@ -113,8 +113,8 @@ impl Config {
         if self.threads == 0 {
             return Err(ConfigError::InvalidEnv("threads", "must be at least 1"));
         }
-        if self.state_path.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidConfig("state_path", "must not be empty"));
+        if !(1..=64).contains(&self.database_pool_size) {
+            return Err(ConfigError::InvalidConfig("database_pool_size", "must be in 1..64"));
         }
         if let Some(feedback) = &self.feedback {
             if !feedback.queue_url.starts_with("https://") {

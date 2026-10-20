@@ -112,10 +112,10 @@ async fn provider_failures_use_the_statuses_the_gem_understands() {
 
 #[tokio::test]
 async fn feedback_feed_is_paginated_without_acknowledging_or_erasing_events() {
-    let directory = tempfile::tempdir().expect("directory");
-    let store = crate::state::Store::open(&directory.path().join("state.redb")).expect("state");
+    let database = crate::test_support::database().await;
+    let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
     for id in ["first", "second"] {
-        store.record(&crate::feedback::test_support::hard_bounce(id)).expect("event");
+        store.record(&crate::feedback::test_support::hard_bounce(id)).await.expect("event");
     }
     let (status, body) = event_page(br#"{"after":0,"limit":1}"#, &store).await;
     assert_eq!(status, 200);
@@ -127,7 +127,7 @@ async fn feedback_feed_is_paginated_without_acknowledging_or_erasing_events() {
     assert_eq!(status, 200);
     let page: Value = serde_json::from_slice(&body).expect("event page");
     assert_eq!(page["next_cursor"], 2);
-    assert_eq!(store.events(0, 100).expect("events").events.len(), 2);
+    assert_eq!(store.events(0, 100).await.expect("events").events.len(), 2);
     for body in [br#"{"limit":0}"#.as_slice(), br#"{"limit":101}"#, br#"{"after":-1}"#, b"invalid"]
     {
         assert_eq!(event_page(body, &store).await.0, 400);
@@ -218,8 +218,8 @@ async fn chunked_docking_requests_return_acceptance_and_reuse_the_link() {
         // Exercise bytes left over by the docking handshake as well as
         // subsequent reads from the same link.
         let pending = BytesMut::from(request_frames(1).as_slice());
-        let directory = tempfile::tempdir().expect("state directory");
-        let store = crate::state::Store::open(&directory.path().join("state.redb")).expect("state");
+        let database = crate::test_support::database().await;
+        let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
         let task = tokio::spawn(serve_link(ship, pending, provider, store));
         let mut replies = BytesMut::new();
         accepted_reply(&mut mothership, &mut replies, 1).await;
@@ -244,8 +244,8 @@ async fn mismatched_body_request_id_closes_the_link_without_sending() {
     let mut frames = hail.seal(1, 2).expect("HAIL").to_vec();
     push_haul(&mut frames, 99, true, b"{}").expect("mismatched HAUL");
     mothership.write_all(&frames).await.expect("request");
-    let directory = tempfile::tempdir().expect("state directory");
-    let store = crate::state::Store::open(&directory.path().join("state.redb")).expect("state");
+    let database = crate::test_support::database().await;
+    let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
     let error =
         serve_link(ship, BytesMut::new(), provider, store).await.expect_err("wrong request id");
     assert!(error.to_string().contains("does not match"));

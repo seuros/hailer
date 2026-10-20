@@ -28,9 +28,9 @@ fn request() -> SendRequest {
 
 #[tokio::test]
 async fn only_suppressed_envelope_recipients_are_removed_and_mime_is_unchanged() {
-    let directory = tempfile::tempdir().expect("directory");
-    let store = Store::open(&directory.path().join("state.redb")).expect("state");
-    store.record(&hard_bounce("feedback")).expect("bounce");
+    let database = crate::test_support::database().await;
+    let store = Store::connect(database.url(), 5).await.expect("state");
+    store.record(&hard_bounce("feedback")).await.expect("bounce");
     let sender = Arc::new(FakeSender::default());
     let guard = SuppressionGuard { inner: sender.clone(), store };
     let original = request();
@@ -46,9 +46,9 @@ async fn only_suppressed_envelope_recipients_are_removed_and_mime_is_unchanged()
 
 #[tokio::test]
 async fn all_suppressed_recipients_never_reach_the_provider() {
-    let directory = tempfile::tempdir().expect("directory");
-    let store = Store::open(&directory.path().join("state.redb")).expect("state");
-    store.record(&hard_bounce("feedback")).expect("bounce");
+    let database = crate::test_support::database().await;
+    let store = Store::connect(database.url(), 5).await.expect("state");
+    store.record(&hard_bounce("feedback")).await.expect("bounce");
     let sender = Arc::new(FakeSender::default());
     let guard = SuppressionGuard { inner: sender.clone(), store };
     let mut message = request();
@@ -59,8 +59,8 @@ async fn all_suppressed_recipients_never_reach_the_provider() {
 
 #[tokio::test]
 async fn unsuppressed_messages_keep_their_original_envelopes() {
-    let directory = tempfile::tempdir().expect("directory");
-    let store = Store::open(&directory.path().join("state.redb")).expect("state");
+    let database = crate::test_support::database().await;
+    let store = Store::connect(database.url(), 5).await.expect("state");
     let sender = Arc::new(FakeSender::default());
     let guard = SuppressionGuard { inner: sender.clone(), store };
     let message = request();

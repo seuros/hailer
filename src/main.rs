@@ -18,6 +18,9 @@ mod feedback;
 mod mail;
 mod provider;
 mod state;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
 
 use std::sync::Arc;
 
@@ -40,16 +43,15 @@ struct Args {
     /// Path to the TOML config file (optional; defaults apply when absent)
     #[usage(long, env = "HAILER_CONFIG")]
     config: Option<String>,
-    /// Durable state file, overriding the TOML setting
-    #[usage(long, global, env = "HAILER_STATE_PATH")]
-    state_path: Option<String>,
     #[usage(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(usage_rs::Subcommands, Debug)]
 enum Command {
-    /// Import an exported JSON array of suppressions (stop the service first)
+    /// Apply Hailer's PostgreSQL schema migrations without docking
+    Migrate,
+    /// Import an exported JSON array of suppressions without docking
     ImportSuppressions(ImportArgs),
 }
 
@@ -76,19 +78,18 @@ async fn main() -> anyhow::Result<()> {
         args.config.is_none() || config_path.exists(),
         "specified config file is missing"
     );
-    let mut config = Config::load(config_path)?;
-    if let Some(path) = args.state_path {
-        config.state_path = path.into();
-    }
+    let config = Config::load(config_path)?;
     config.validate()?;
-    let state_path = config.state_path.clone();
-    let store = tokio::task::spawn_blocking(move || state::Store::open(&state_path)).await??;
+    let database_url = std::env::var("HAILER_DATABASE_URL")
+        .map_err(|_| anyhow::anyhow!("set HAILER_DATABASE_URL to Hailer's PostgreSQL database"))?;
+    let store = state::Store::connect(&database_url, config.database_pool_size).await?;
+    if matches!(args.command, Some(Command::Migrate)) {
+        println!("{}", serde_json::json!({"migrated": true}));
+        return Ok(());
+    }
     if let Some(Command::ImportSuppressions(ImportArgs { file })) = args.command {
-        let count = tokio::task::spawn_blocking(move || {
-            let records = serde_json::from_reader(std::fs::File::open(file)?)?;
-            store.import(records)
-        })
-        .await??;
+        let records = serde_json::from_reader(std::fs::File::open(file)?)?;
+        let count = store.import(records).await?;
         println!("{}", serde_json::json!({"imported": count}));
         return Ok(());
     }

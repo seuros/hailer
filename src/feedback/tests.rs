@@ -110,8 +110,8 @@ impl FeedbackQueue for FakeQueue {
 
     async fn delete(&self, receipt: &str) -> anyhow::Result<()> {
         // Acknowledge only after BOTH the event and suppression are readable.
-        assert_eq!(self.store.events(0, 100)?.events.len(), 1);
-        assert!(self.store.blocked(&[ADDRESS.into()])?.contains("user@example.com"));
+        assert_eq!(self.store.events(0, 100).await?.events.len(), 1);
+        assert!(self.store.blocked(&[ADDRESS.into()]).await?.contains("user@example.com"));
         anyhow::ensure!(!self.fail_delete.load(Ordering::SeqCst), "simulated SQS delete failure");
         self.acknowledged.lock().expect("acknowledgements").push(receipt.into());
         Ok(())
@@ -127,8 +127,8 @@ fn message() -> QueuedMessage {
 
 #[tokio::test]
 async fn acknowledgement_failure_and_redelivery_do_not_duplicate_events() {
-    let directory = tempfile::tempdir().expect("directory");
-    let store = Store::open(&directory.path().join("state.redb")).expect("store");
+    let database = crate::test_support::database().await;
+    let store = Store::connect(database.url(), 5).await.expect("store");
     let queue = FakeQueue {
         store: store.clone(),
         fail_delete: AtomicBool::new(true),
@@ -138,14 +138,14 @@ async fn acknowledgement_failure_and_redelivery_do_not_duplicate_events() {
     assert!(queue.acknowledged.lock().expect("acks").is_empty());
     queue.fail_delete.store(false, Ordering::SeqCst);
     process(&queue, &store, TOPIC, message()).await.expect("redelivery");
-    assert_eq!(store.events(0, 100).expect("events").events.len(), 1);
+    assert_eq!(store.events(0, 100).await.expect("events").events.len(), 1);
     assert_eq!(*queue.acknowledged.lock().expect("acks"), ["receipt-1"]);
 }
 
 #[tokio::test]
 async fn rejected_feedback_is_never_acknowledged_or_committed() {
-    let directory = tempfile::tempdir().expect("directory");
-    let store = Store::open(&directory.path().join("state.redb")).expect("store");
+    let database = crate::test_support::database().await;
+    let store = Store::connect(database.url(), 5).await.expect("store");
     let queue = FakeQueue {
         store: store.clone(),
         fail_delete: AtomicBool::new(false),
@@ -153,5 +153,5 @@ async fn rejected_feedback_is_never_acknowledged_or_committed() {
     };
     assert!(process(&queue, &store, "wrong-topic", message()).await.is_err());
     assert!(queue.acknowledged.lock().expect("acks").is_empty());
-    assert!(store.events(0, 100).expect("events").events.is_empty());
+    assert!(store.events(0, 100).await.expect("events").events.is_empty());
 }

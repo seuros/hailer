@@ -72,8 +72,7 @@ pub async fn process(
 ) -> anyhow::Result<()> {
     let event = FeedbackEvent::from_sns(&message.body, topic)?;
     let event_id = event.event_id.clone();
-    let state = store.clone();
-    let inserted = tokio::task::spawn_blocking(move || state.record(&event)).await??;
+    let inserted = store.record(&event).await?;
     queue.delete(&message.receipt).await?;
     info!(%event_id, inserted, "SES feedback committed and acknowledged");
     Ok(())

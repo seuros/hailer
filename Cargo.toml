@@ -36,8 +36,9 @@ aws-config = "1.12"
 # SES feedback arrives through a private SQS queue subscribed to SNS.
 aws-sdk-sqs = "1.114"
 
-# Atomic, durable feedback deduplication, event history, and suppressions.
+# Only the explicit offline migration command reads legacy redb files.
 redb = "4.3"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "migrate", "macros"] }
 
 # Recipient address validation at the boundary. `emval` was tried first (per
 # the dependency research) but turned out to be a Python-extension-first

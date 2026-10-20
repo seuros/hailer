@@ -115,13 +115,12 @@ async fn event_page(body: &[u8], store: &Store) -> (u16, Vec<u8>) {
         Ok(query) if (1..=100).contains(&query.limit) => query,
         _ => return (400, error_body("expected after cursor and limit in 1..100")),
     };
-    let store = store.clone();
-    match tokio::task::spawn_blocking(move || store.events(query.after, query.limit)).await {
-        Ok(Ok(page)) => serde_json::to_vec(&page).map_or_else(
+    match store.events(query.after, query.limit).await {
+        Ok(page) => serde_json::to_vec(&page).map_or_else(
             |_| (503, error_body("feedback serialization failed")),
             |body| (200, body),
         ),
-        _ => (503, error_body("feedback state unavailable")),
+        Err(_) => (503, error_body("feedback state unavailable")),
     }
 }
 

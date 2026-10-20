@@ -18,10 +18,10 @@ pub struct SuppressionGuard {
 impl MailProvider for SuppressionGuard {
     async fn send(&self, request: &SendRequest) -> Result<String, ProviderError> {
         let addresses: Vec<_> = request.recipients().map(str::to_string).collect();
-        let store = self.store.clone();
-        let blocked = tokio::task::spawn_blocking(move || store.blocked(&addresses))
+        let blocked = self
+            .store
+            .blocked(&addresses)
             .await
-            .map_err(|_| ProviderError::Transport("suppression lookup task failed".into()))?
             .map_err(|_| ProviderError::Transport("suppression state unavailable".into()))?;
         if blocked.is_empty() {
             return self.inner.send(request).await;
