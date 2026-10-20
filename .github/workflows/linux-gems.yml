@@ -1,0 +1,141 @@
+name: Linux binary gems
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and extend
+        required: true
+        default: v0.1.0
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-gems-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: x86_64-linux-gnu
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    # Build against glibc 2.36 rather than the host runner's newer libc.
+    container: ruby:4.0-bookworm
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+      BUNDLE_FROZEN: "true"
+      EXPECTED_PLATFORM: ${{ matrix.platform }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - name: Check release version and install build dependencies
+        run: |
+          ruby -Ilib -rhailer/version -e 'abort "tag/version mismatch" unless ENV.fetch("RELEASE_TAG") == "v#{Hailer::VERSION}"'
+          apt-get update
+          apt-get install -y --no-install-recommends cmake pkg-config
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: "1.99"
+      - name: Install locked Ruby dependencies
+        run: |
+          version=$(ruby -e 'puts File.read("Gemfile.lock").split("BUNDLED WITH").last.strip')
+          gem install bundler --version "$version" --no-document
+          bundle config set path vendor/bundle
+          bundle config set force_ruby_platform true
+          bundle install
+      - name: Test and package
+        run: |
+          ruby -Ilib -rhailer/binary -e 'abort "unexpected host" unless Hailer::Binary.platform == ENV.fetch("EXPECTED_PLATFORM")'
+          bundle exec rake test
+          cargo test --release --locked
+          bundle exec rake native:package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hailer-${{ matrix.platform }}
+          path: pkg/hailer-*-${{ matrix.platform }}.gem
+          if-no-files-found: error
+          retention-days: 7
+
+  runtime:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: x86_64-linux-gnu
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    # Prove the artifact runs without the build image's toolchain/libraries.
+    container: ruby:4.0-slim-bookworm
+    timeout-minutes: 20
+    env:
+      EXPECTED_PLATFORM: ${{ matrix.platform }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hailer-${{ matrix.platform }}
+          path: pkg
+      - name: Install binary gem and exercise offline CLI
+        run: |
+          gem install pkg/hailer-*-"$EXPECTED_PLATFORM".gem --no-document
+          ruby -rhailer/binary -e 'abort "wrong installed platform" unless Gem.loaded_specs.fetch("hailer").platform.to_s == ENV.fetch("EXPECTED_PLATFORM")'
+          test "$(hailer --version)" = "hailer ${RELEASE_TAG#v}"
+          binary=$(ruby -rhailer/binary -e 'puts Hailer::Binary.path')
+          ldd "$binary"
+          hailer --state-path /tmp/hailer-smoke.redb import-suppressions --file test/fixtures/suppressions.json > /tmp/import.json
+          ruby -rjson -e 'abort "import failed" unless JSON.parse(File.read("/tmp/import.json")).fetch("imported") == 2'
+
+  attach:
+    needs: runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: hailer-*-linux-gnu
+          merge-multiple: true
+          path: new
+      - name: Extend release without replacing existing gems
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir existing combined
+          gh release download "$RELEASE_TAG" --dir existing --pattern '*.gem' --pattern SHA256SUMS
+          (cd existing && sha256sum --check SHA256SUMS)
+          for gem in new/*.gem; do
+            name=$(basename "$gem")
+            if [[ -f "existing/$name" ]]; then
+              cmp "$gem" "existing/$name"
+            else
+              gh release upload "$RELEASE_TAG" "$gem"
+            fi
+          done
+          cp existing/*.gem combined/
+          cp new/*.gem combined/
+          (cd combined && sha256sum *.gem > SHA256SUMS)
+          gh release upload "$RELEASE_TAG" combined/SHA256SUMS --clobber
