@@ -1,19 +1,22 @@
 name: Linux binary gems
 
 on:
+  push:
+    branches: [master, "feat/**"]
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
         description: Existing release tag to build and extend
         required: true
-        default: v0.1.0
+        default: v0.2.0
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: linux-gems-${{ inputs.tag }}
+  group: linux-gems-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -29,6 +32,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # Build against glibc 2.36 rather than the host runner's newer libc.
     container: ruby:4.0-bookworm
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: hailer
+          POSTGRES_PASSWORD: hailer-test
+          POSTGRES_DB: hailer_test
+        options: >-
+          --health-cmd "pg_isready -U hailer -d hailer_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: "2"
@@ -37,14 +50,16 @@ jobs:
       BUNDLE_FORCE_RUBY_PLATFORM: "true"
       EXPECTED_PLATFORM: ${{ matrix.platform }}
       RELEASE_TAG: ${{ inputs.tag }}
+      HAILER_TEST_DATABASE_URL: postgres://hailer:hailer-test@postgres:5432/hailer_test
+      RUST_TEST_THREADS: "2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || github.sha }}
           persist-credentials: false
       - name: Check release version and install build dependencies
         run: |
-          ruby -Ilib -rhailer/version -e 'abort "tag/version mismatch" unless ENV.fetch("RELEASE_TAG") == "v#{Hailer::VERSION}"'
+          ruby -Ilib -rhailer/version -e 'tag = ENV.fetch("RELEASE_TAG"); abort "tag/version mismatch" unless tag.empty? || tag == "v#{Hailer::VERSION}"'
           apt-get update
           apt-get install -y --no-install-recommends cmake pkg-config
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -89,30 +104,44 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # Prove the artifact runs without the build image's toolchain/libraries.
     container: ruby:4.0-slim-bookworm
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: hailer
+          POSTGRES_PASSWORD: hailer-test
+          POSTGRES_DB: hailer_test
+        options: >-
+          --health-cmd "pg_isready -U hailer -d hailer_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     timeout-minutes: 20
     env:
       EXPECTED_PLATFORM: ${{ matrix.platform }}
       RELEASE_TAG: ${{ inputs.tag }}
+      HAILER_DATABASE_URL: postgres://hailer:hailer-test@postgres:5432/hailer_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || github.sha }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: hailer-${{ matrix.platform }}
           path: pkg
-      - name: Install binary gem and exercise offline CLI
+      - name: Install binary gem and exercise PostgreSQL CLI
         run: |
           gem install pkg/hailer-*-"$EXPECTED_PLATFORM".gem --no-document
           ruby -rhailer/binary -e 'abort "wrong installed platform" unless Gem.loaded_specs.fetch("hailer").platform.to_s == ENV.fetch("EXPECTED_PLATFORM")'
-          test "$(hailer --version)" = "hailer ${RELEASE_TAG#v}"
+          version=$(ruby -Ilib -rhailer/version -e 'puts Hailer::VERSION')
+          test "$(hailer --version)" = "hailer $version"
           binary=$(ruby -rhailer/binary -e 'puts Hailer::Binary.path')
           ldd "$binary"
-          hailer --state-path /tmp/hailer-smoke.redb import-suppressions --file test/fixtures/suppressions.json > /tmp/import.json
+          hailer migrate
+          hailer import-suppressions --file test/fixtures/suppressions.json > /tmp/import.json
           ruby -rjson -e 'abort "import failed" unless JSON.parse(File.read("/tmp/import.json")).fetch("imported") == 2'
 
   attach:
+    if: github.event_name == 'workflow_dispatch'
     needs: runtime
     runs-on: ubuntu-24.04
     timeout-minutes: 10
