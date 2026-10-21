@@ -20,10 +20,13 @@ mod reader;
 use std::sync::Arc;
 
 use tokio::net::{UnixListener, UnixStream};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::config::DockingConfig;
 use crate::provider::MailProvider;
+use crate::runtime::Runtime;
 use crate::state::Store;
 
 /// Bind the docking socket and serve links until the process exits. A link
@@ -33,6 +36,8 @@ pub async fn serve(
     docking: DockingConfig,
     provider: Arc<dyn MailProvider>,
     store: Store,
+    runtime: Arc<Runtime>,
+    stop: CancellationToken,
 ) -> anyhow::Result<()> {
     let socket_path = docking.socket_path();
     if let Some(parent) = socket_path.parent() {
@@ -45,18 +50,28 @@ pub async fn serve(
     let listener = UnixListener::bind(&socket_path)?;
     info!(socket = %socket_path.display(), "Listening for Mothership connection");
 
+    let mut links = JoinSet::new();
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = tokio::select! {
+            biased;
+            () = stop.cancelled() => break,
+            Some(_) = links.join_next(), if !links.is_empty() => continue,
+            result = listener.accept() => result?,
+        };
         info!("Mothership opened a docking link");
         let ship_name = docking.ship_name.clone();
         let provider = Arc::clone(&provider);
         let store = store.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_link(stream, &ship_name, provider, store).await {
-                error!(%error, "Docking link ended");
+        let (runtime, stop) = (runtime.clone(), stop.clone());
+        links.spawn(async move {
+            if handle_link(stream, &ship_name, provider, store, runtime, stop).await.is_err() {
+                error!("Docking link ended");
             }
         });
     }
+    drop(listener);
+    while links.join_next().await.is_some() {}
+    Ok(())
 }
 
 async fn handle_link(
@@ -64,9 +79,14 @@ async fn handle_link(
     ship_name: &str,
     provider: Arc<dyn MailProvider>,
     store: Store,
+    runtime: Arc<Runtime>,
+    stop: CancellationToken,
 ) -> anyhow::Result<()> {
-    let (moored, pending) =
-        handshake::dock(&mut stream, ship_name, std::time::Duration::from_secs(10)).await?;
+    let (moored, pending) = tokio::select! {
+        biased;
+        () = stop.cancelled() => return Ok(()),
+        result = handshake::dock(&mut stream, ship_name, std::time::Duration::from_secs(10)) => result?,
+    };
     info!(config_keys = ?moored.config.keys().collect::<Vec<_>>(), "Docking link established");
-    exchange::serve_link(stream, pending, provider, store).await
+    exchange::serve_link(stream, pending, provider, store, runtime, stop).await
 }

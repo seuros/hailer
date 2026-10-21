@@ -190,7 +190,7 @@ impl Store {
     }
 }
 
-pub(crate) fn validate(mut record: Suppression) -> anyhow::Result<Suppression> {
+pub fn validate(mut record: Suppression) -> anyhow::Result<Suppression> {
     record.email_address = normalize(&record.email_address)?;
     record.suppressed_at = record
         .suppressed_at
@@ -200,14 +200,14 @@ pub(crate) fn validate(mut record: Suppression) -> anyhow::Result<Suppression> {
     Ok(record)
 }
 
-pub(crate) async fn merge_all(
+pub async fn merge_all(
     transaction: &mut Transaction<'_, Postgres>,
     records: &[Suppression],
 ) -> anyhow::Result<()> {
     bulk::merge(transaction, records).await
 }
 
-/// Explicit CommonShare matching policy; never rewrite a delivery address.
+/// Explicit `CommonShare` matching policy; never rewrite a delivery address.
 pub fn normalize(address: &str) -> anyhow::Result<String> {
     let address = address.trim().to_ascii_lowercase();
     let parsed = address

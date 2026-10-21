@@ -5,6 +5,7 @@ use sqlx::Row;
 
 use super::*;
 use crate::feedback::SuppressionReason;
+use std::assert_matches;
 
 type Step = (Option<String>, Result<Page, ReadError>);
 
@@ -44,6 +45,8 @@ fn record(address: &str, reason: SuppressionReason) -> Suppression {
     }
 }
 
+// Scripted steps intentionally have the same Result type for successes and failures.
+#[allow(clippy::unnecessary_wraps)]
 fn page(records: Vec<Suppression>, next: Option<&str>) -> Result<Page, ReadError> {
     Ok(Page { records, next_token: next.map(str::to_owned) })
 }
@@ -188,7 +191,7 @@ async fn only_safe_read_failures_are_retried() {
     ]);
     assert!(read_page(&source, None).await.is_ok());
     let rejected = Fake::new(vec![(None, Err(ReadError::Rejected))]);
-    assert!(matches!(read_page(&rejected, None).await, Err(ReadError::Rejected)));
+    assert_matches!(read_page(&rejected, None).await, Err(ReadError::Rejected));
 }
 
 #[tokio::test]

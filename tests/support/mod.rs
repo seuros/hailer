@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sqlx::postgres::PgConnectOptions;
-use sqlx::{Connection, PgConnection};
+use sqlx::{ConnectOptions, Connection, PgConnection};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -32,7 +32,6 @@ pub async fn database() -> Database {
         .execute(&mut connection)
         .await
         .expect("isolated test database");
-    use sqlx::ConnectOptions;
     let url = options.clone().database(&name).to_url_lossy().to_string();
     Database { options, name, url }
 }

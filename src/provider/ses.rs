@@ -67,16 +67,21 @@ impl SesProvider {
             call = call.from_email_address(from);
         }
         let output = call.send().await.map_err(|error| {
-            if let Some(service) = error.as_service_error() {
-                classify(
-                    service.code(),
-                    error.raw_response().map(|response| response.status().as_u16()),
-                )
-            } else if matches!(error, SdkError::ConstructionFailure(_)) {
-                ProviderError::InvalidRequest
-            } else {
-                ProviderError::Ambiguous
-            }
+            error.as_service_error().map_or_else(
+                || {
+                    if matches!(error, SdkError::ConstructionFailure(_)) {
+                        ProviderError::InvalidRequest
+                    } else {
+                        ProviderError::Ambiguous
+                    }
+                },
+                |service| {
+                    classify(
+                        service.code(),
+                        error.raw_response().map(|response| response.status().as_u16()),
+                    )
+                },
+            )
         })?;
         output
             .message_id()

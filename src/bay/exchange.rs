@@ -13,16 +13,20 @@ use mothership_docking_protocol::{
     MessageType, Reply, ReplyBody, decode_hail, decode_haul, encode_ready, encode_reply, push_haul,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::bay::reader::next_frame;
 use crate::mail::{SendErrorBody, SendRequest, SendResponse};
 use crate::provider::MailProvider;
+use crate::runtime::Runtime;
 use crate::state::Store;
 
 /// Private send and provider-neutral feedback feed routes.
 const SEND_PATH: &str = "/internal/mail/send";
 const EVENTS_PATH: &str = "/internal/mail/events";
+const HEALTH_PATH: &str = "/internal/mail/health";
+const READY_PATH: &str = "/internal/mail/ready";
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
 pub async fn serve_link<S>(
@@ -30,17 +34,24 @@ pub async fn serve_link<S>(
     mut pending: BytesMut,
     provider: Arc<dyn MailProvider>,
     store: Store,
+    runtime: Arc<Runtime>,
+    stop: CancellationToken,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     loop {
-        let (msg_type, payload) = next_frame(&mut stream, &mut pending).await?;
+        let (msg_type, payload) = tokio::select! {
+            biased;
+            () = stop.cancelled() => return Ok(()),
+            result = next_frame(&mut stream, &mut pending) => result?,
+        };
         if msg_type != MessageType::Hail {
             anyhow::bail!("expected HAIL, got {msg_type:?}");
         }
         let hail = decode_hail(&payload)?;
         let request_id = hail.request_id;
+        let permit = runtime.enter();
 
         let body = tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -58,7 +69,15 @@ where
             "HAIL"
         );
 
-        let (status, response_body) = if method == b"POST" && path == EVENTS_PATH.as_bytes() {
+        let (status, response_body) = if permit.is_none() {
+            (503, error_body("service draining"))
+        } else if method == b"GET"
+            && (path == HEALTH_PATH.as_bytes() || path == READY_PATH.as_bytes())
+        {
+            let health = runtime.health(store.healthy().await, provider.circuit_state());
+            let status = if path == READY_PATH.as_bytes() && !health.ready { 503 } else { 200 };
+            (status, serde_json::to_vec(&health)?)
+        } else if method == b"POST" && path == EVENTS_PATH.as_bytes() {
             event_page(&body, &store).await
         } else {
             handle(method, path, &body, &provider).await
@@ -115,13 +134,15 @@ async fn event_page(body: &[u8], store: &Store) -> (u16, Vec<u8>) {
         Ok(query) if (1..=100).contains(&query.limit) => query,
         _ => return (400, error_body("expected after cursor and limit in 1..100")),
     };
-    match store.events(query.after, query.limit).await {
-        Ok(page) => serde_json::to_vec(&page).map_or_else(
-            |_| (503, error_body("feedback serialization failed")),
-            |body| (200, body),
-        ),
-        Err(_) => (503, error_body("feedback state unavailable")),
-    }
+    store.events(query.after, query.limit).await.map_or_else(
+        |_| (503, error_body("feedback state unavailable")),
+        |page| {
+            serde_json::to_vec(&page).map_or_else(
+                |_| (503, error_body("feedback serialization failed")),
+                |body| (200, body),
+            )
+        },
+    )
 }
 
 fn param<'a>(params: &'a [(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<&'a [u8]> {

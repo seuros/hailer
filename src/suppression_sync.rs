@@ -18,6 +18,7 @@ use crate::state::{Store, Suppression};
 
 pub use aws::AwsSuppressions;
 
+#[derive(Debug)]
 pub struct Page {
     pub records: Vec<Suppression>,
     pub next_token: Option<String>,

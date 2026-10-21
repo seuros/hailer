@@ -22,6 +22,8 @@ pub enum Decision {
 }
 
 #[derive(Clone, Copy)]
+// Independent binary circuit inputs, not mutually exclusive lifecycle states.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Snapshot {
     pub valid: bool,
     pub service_ready: bool,
@@ -71,7 +73,9 @@ pub struct Policy {
 impl Policy {
     pub fn new() -> anyhow::Result<Self> {
         let branches = LEAVES[..8]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| Node::sequence([Node::leaf(pair[0]), Node::leaf(pair[1])]))
             .chain(std::iter::once(Node::leaf(LEAVES[8])));
         let lowered = Lowered::new(&Node::reactive_fallback(branches))?;

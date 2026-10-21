@@ -70,7 +70,7 @@ impl Source for AwsSuppressions {
         .map_err(|_| ReadError::Unavailable)?
         .map_err(|error| {
             let service = error.as_service_error();
-            if service.is_some_and(|error| error.is_invalid_next_token_exception()) {
+            if service.is_some_and(aws_sdk_sesv2::operation::list_suppressed_destinations::ListSuppressedDestinationsError::is_invalid_next_token_exception) {
                 ReadError::InvalidToken
             } else if service.is_some_and(|error| {
                 matches!(

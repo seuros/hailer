@@ -9,8 +9,9 @@
 //! # Shutdown
 //!
 //! Feedback is committed before SQS acknowledgement. Interrupted/unacknowledged
-//! receipts are retried by SQS. In-flight sends still have ambiguous outcomes
-//! on shutdown; the send path does not yet provide graceful draining.
+//! receipts are retried by SQS. Shutdown stops admission and drains owned
+//! operations within a bounded deadline. Sends interrupted at that deadline
+//! can still have ambiguous outcomes and must not be blindly retried.
 
 mod bay;
 mod config;
@@ -18,7 +19,9 @@ mod control;
 mod feedback;
 mod mail;
 mod provider;
+mod runtime;
 mod state;
+mod supervisor;
 mod suppression_sync;
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
@@ -136,31 +139,9 @@ async fn main() -> anyhow::Result<()> {
     let provider: Arc<dyn MailProvider> = Arc::new(SuppressionGuard {
         inner: Arc::new(SesProvider::new(&aws)),
         store: store.clone(),
-        control,
+        control: control.clone(),
     });
-    let feedback_store = store.clone();
-    let feedback = async {
-        if let Some(feedback_config) = &config.feedback {
-            let queue = feedback::AwsQueue::new(&aws, feedback_config.queue_url.clone());
-            feedback::run(&queue, feedback_store, feedback_config).await
-        } else {
-            warn!("Feedback ingestion disabled; only previously stored suppressions are enforced");
-            std::future::pending::<anyhow::Result<()>>().await
-        }
-    };
-
-    tokio::select! {
-        result = bay::serve(docking, provider, store) => {
-            if let Err(error) = result {
-                error!(%error, "Docking transport failed");
-                return Err(error);
-            }
-        }
-        result = feedback => result?,
-        () = wait_for_signal() => {
-            info!("Shutdown signal received");
-        }
-    }
+    supervisor::run(docking, config, aws, provider, store, control).await?;
 
     info!("hailer stopped");
     Ok(())

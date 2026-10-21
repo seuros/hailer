@@ -190,11 +190,21 @@ fn request_frames(request_id: u32) -> Vec<u8> {
 }
 
 async fn accepted_reply(stream: &mut DuplexStream, pending: &mut BytesMut, request_id: u32) {
+    let (status, response) = json_reply(stream, pending, request_id).await;
+    assert_eq!(status, 200);
+    assert_eq!(response["message_id"], "ses-test-id");
+}
+
+async fn json_reply(
+    stream: &mut DuplexStream,
+    pending: &mut BytesMut,
+    request_id: u32,
+) -> (u16, Value) {
     let (kind, payload) = next_frame(stream, pending).await.expect("REPLY frame");
     assert_eq!(kind, MessageType::Reply);
     let reply = decode_reply(&payload).expect("REPLY");
     assert_eq!(reply.request_id, request_id);
-    assert_eq!(reply.status, 200);
+    let status = reply.status;
     assert_matches!(reply.body, ReplyBodyRef::Stream);
     assert!(
         reply
@@ -209,11 +219,19 @@ async fn accepted_reply(stream: &mut DuplexStream, pending: &mut BytesMut, reque
     assert_eq!(body.request_id, request_id);
     assert!(body.fin);
     let response: Value = serde_json::from_slice(body.data).expect("response JSON");
-    assert_eq!(response["message_id"], "ses-test-id");
 
     let (kind, payload) = next_frame(stream, pending).await.expect("READY frame");
     assert_eq!(kind, MessageType::Ready);
     assert_eq!(decode_ready(&payload).expect("READY"), request_id);
+    (status, response)
+}
+
+fn runtime(bootstrapped: bool) -> Arc<Runtime> {
+    Runtime::new(
+        Arc::new(crate::control::Control::new(None, bootstrapped).expect("control")),
+        false,
+        !bootstrapped,
+    )
 }
 
 #[tokio::test]
@@ -227,7 +245,14 @@ async fn chunked_docking_requests_return_acceptance_and_reuse_the_link() {
         let pending = BytesMut::from(request_frames(1).as_slice());
         let database = crate::test_support::database().await;
         let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
-        let task = tokio::spawn(serve_link(ship, pending, provider, store));
+        let task = tokio::spawn(serve_link(
+            ship,
+            pending,
+            provider,
+            store,
+            runtime(true),
+            CancellationToken::new(),
+        ));
         let mut replies = BytesMut::new();
         accepted_reply(&mut mothership, &mut replies, 1).await;
         mothership.write_all(&request_frames(2)).await.expect("second request");
@@ -254,7 +279,95 @@ async fn mismatched_body_request_id_closes_the_link_without_sending() {
     let database = crate::test_support::database().await;
     let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
     let error =
-        serve_link(ship, BytesMut::new(), provider, store).await.expect_err("wrong request id");
+        serve_link(ship, BytesMut::new(), provider, store, runtime(true), CancellationToken::new())
+            .await
+            .expect_err("wrong request id");
     assert!(error.to_string().contains("does not match"));
     assert!(fake.requests.lock().expect("request lock").is_empty());
+}
+
+#[tokio::test]
+async fn private_health_and_readiness_report_bootstrap_over_the_real_protocol() {
+    let database = crate::test_support::database().await;
+    let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
+    let runtime = runtime(false);
+    let stop = CancellationToken::new();
+    let (mut client, ship) = duplex(16_384);
+    let task = tokio::spawn(serve_link(
+        ship,
+        BytesMut::new(),
+        FakeProvider::new(Outcome::Accepted),
+        store,
+        runtime.clone(),
+        stop.clone(),
+    ));
+    let mut pending = BytesMut::new();
+    for (id, path, expected_status, ready) in
+        [(1, HEALTH_PATH, 200, false), (2, READY_PATH, 503, false), (3, READY_PATH, 200, true)]
+    {
+        if ready {
+            runtime.sync_ok(7);
+        }
+        let mut hail = HailFrame::default();
+        hail.param(b"REQUEST_METHOD", b"GET");
+        hail.param(b"PATH_INFO", path.as_bytes());
+        client.write_all(hail.seal(id, 0).expect("HAIL")).await.expect("write");
+        let (status, body) = json_reply(&mut client, &mut pending, id).await;
+        assert_eq!(status, expected_status);
+        assert_eq!(body["ready"], ready);
+        assert_eq!(body["storage"], "ready");
+    }
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("idle link stops")
+        .expect("task")
+        .expect("stop");
+}
+
+struct DelayedProvider {
+    started: tokio::sync::Notify,
+    finish: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl MailProvider for DelayedProvider {
+    async fn send(&self, _: &SendRequest) -> Result<String, ProviderError> {
+        self.started.notify_one();
+        self.finish.notified().await;
+        Ok("ses-test-id".into())
+    }
+}
+
+#[tokio::test]
+async fn cancellation_drains_an_in_flight_send_instead_of_losing_its_response() {
+    let database = crate::test_support::database().await;
+    let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
+    let runtime = runtime(true);
+    let stop = CancellationToken::new();
+    let provider = Arc::new(DelayedProvider {
+        started: tokio::sync::Notify::new(),
+        finish: tokio::sync::Notify::new(),
+    });
+    let (mut client, ship) = duplex(16_384);
+    let task = tokio::spawn(serve_link(
+        ship,
+        BytesMut::new(),
+        provider.clone(),
+        store,
+        runtime.clone(),
+        stop.clone(),
+    ));
+    client.write_all(&request_frames(1)).await.expect("request");
+    tokio::time::timeout(Duration::from_secs(1), provider.started.notified())
+        .await
+        .expect("send started");
+    runtime.control.drain();
+    stop.cancel();
+    assert_eq!(runtime.health(true, "closed").in_flight_requests, 1);
+    assert!(!task.is_finished());
+    provider.finish.notify_one();
+    accepted_reply(&mut client, &mut BytesMut::new(), 1).await;
+    task.await.expect("task").expect("drained link");
+    assert_eq!(runtime.health(true, "closed").in_flight_requests, 0);
 }

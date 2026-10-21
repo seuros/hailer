@@ -155,3 +155,81 @@ async fn rejected_feedback_is_never_acknowledged_or_committed() {
     assert!(queue.acknowledged.lock().expect("acks").is_empty());
     assert!(store.events(0, 100).await.expect("events").events.is_empty());
 }
+
+struct DrainingQueue {
+    received: AtomicBool,
+    deleting: tokio::sync::Notify,
+    finish: tokio::sync::Notify,
+    acknowledged: AtomicBool,
+}
+
+#[async_trait]
+impl FeedbackQueue for DrainingQueue {
+    async fn receive(&self) -> anyhow::Result<Vec<QueuedMessage>> {
+        if self.received.swap(true, Ordering::SeqCst) {
+            std::future::pending().await
+        } else {
+            Ok(vec![message(), message()])
+        }
+    }
+
+    async fn delete(&self, _: &str) -> anyhow::Result<()> {
+        self.deleting.notify_one();
+        self.finish.notified().await;
+        self.acknowledged.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn shutdown_finishes_the_current_commit_and_ack_but_leaves_the_batch_tail() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    let database = crate::test_support::database().await;
+    let store = Store::connect(database.url(), 5).await.expect("store");
+    let queue = Arc::new(DrainingQueue {
+        received: AtomicBool::new(false),
+        deleting: tokio::sync::Notify::new(),
+        finish: tokio::sync::Notify::new(),
+        acknowledged: AtomicBool::new(false),
+    });
+    let runtime = crate::runtime::Runtime::new(
+        Arc::new(crate::control::Control::new(None, true).expect("control")),
+        true,
+        false,
+    );
+    let stop = CancellationToken::new();
+    let task = tokio::spawn({
+        let (queue, store, runtime, stop) =
+            (queue.clone(), store.clone(), runtime.clone(), stop.clone());
+        async move {
+            queue::run(
+                &*queue,
+                store,
+                &crate::config::FeedbackConfig {
+                    queue_url: "https://sqs.example.test/queue".into(),
+                    topic_arn: TOPIC.into(),
+                },
+                &runtime,
+                stop,
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), queue.deleting.notified())
+        .await
+        .expect("commit reached");
+    assert_eq!(store.events(0, 100).await.expect("committed").events.len(), 1);
+    stop.cancel();
+    assert!(!task.is_finished());
+    queue.finish.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("drained")
+        .expect("task")
+        .expect("worker");
+    assert!(queue.acknowledged.load(Ordering::SeqCst));
+    assert_eq!(runtime.health(true, "closed").feedback_acknowledged, 1);
+}

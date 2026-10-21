@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::*;
+use std::assert_matches;
 
 fn request() -> SendRequest {
     SendRequest {
@@ -79,7 +80,7 @@ async fn fixture(
 #[tokio::test]
 async fn sdk_send_is_single_attempt_even_for_server_errors() {
     let (provider, calls, task) = fixture(500, r#"{"message":"server failed"}"#, false).await;
-    assert!(matches!(provider.send(&request()).await, Err(ProviderError::Transport(_))));
+    assert_matches!(provider.send(&request()).await, Err(ProviderError::Transport(_)));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.client.config().retry_config().expect("retry config").max_attempts(), 1);
     task.abort();
@@ -89,7 +90,7 @@ async fn sdk_send_is_single_attempt_even_for_server_errors() {
 #[tokio::test]
 async fn network_loss_has_an_explicit_ambiguous_outcome_and_is_not_retried() {
     let (provider, calls, task) = fixture(200, "", true).await;
-    assert!(matches!(provider.send(&request()).await, Err(ProviderError::Ambiguous)));
+    assert_matches!(provider.send(&request()).await, Err(ProviderError::Ambiguous));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     task.abort();
     assert!(task.await.expect_err("fixture stopped").is_cancelled());
@@ -102,7 +103,7 @@ async fn client_rejections_and_invalid_input_do_not_trip_the_provider_circuit() 
             .await;
     for _ in 0..8 {
         let error = provider.send(&request()).await.expect_err("rejected");
-        assert!(matches!(error, ProviderError::Rejected(_)));
+        assert_matches!(error, ProviderError::Rejected(_));
         assert!(!error.to_string().contains("private"));
     }
     let mut invalid = request();

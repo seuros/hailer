@@ -2,10 +2,12 @@ use std::time::Duration;
 
 use anyhow::Context;
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::FeedbackEvent;
 use crate::config::FeedbackConfig;
+use crate::runtime::Runtime;
 use crate::state::Store;
 
 pub struct QueuedMessage {
@@ -82,21 +84,45 @@ pub async fn run(
     queue: &dyn FeedbackQueue,
     store: Store,
     config: &FeedbackConfig,
+    runtime: &Runtime,
+    stop: CancellationToken,
 ) -> anyhow::Result<()> {
+    let backoff = chrono_machines::Policy {
+        max_attempts: u8::MAX,
+        base_delay_ms: 1000,
+        multiplier: 2.0,
+        max_delay_ms: 30_000,
+    };
+    let mut failures = 0u8;
     loop {
-        match queue.receive().await {
-            Ok(messages) => {
-                for message in messages {
-                    // Invalid/untrusted messages remain unacknowledged for the
-                    // queue's configured dead-letter policy. Never log bodies.
-                    if let Err(error) = process(queue, &store, &config.topic_arn, message).await {
-                        warn!(%error, "Feedback not acknowledged; SQS will retry");
-                    }
+        let received = tokio::select! {
+            biased;
+            () = stop.cancelled() => return Ok(()),
+            result = queue.receive() => result,
+        };
+        if let Ok(messages) = received {
+            failures = 0;
+            runtime.feedback_ok();
+            for message in messages {
+                if stop.is_cancelled() {
+                    return Ok(());
+                }
+                // Invalid/untrusted messages remain unacknowledged for the
+                // queue's configured dead-letter policy. Never log bodies.
+                if process(queue, &store, &config.topic_arn, message).await.is_err() {
+                    runtime.feedback_error();
+                    warn!("Feedback not acknowledged; SQS will retry");
+                } else {
+                    runtime.acknowledged();
                 }
             }
-            Err(error) => {
-                warn!(%error, "SQS receive failed");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+        } else {
+            runtime.feedback_error();
+            failures = failures.saturating_add(1);
+            warn!("SQS receive failed");
+            tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                () = tokio::time::sleep(Duration::from_millis(backoff.calculate_delay(failures, 0.25))) => {}
             }
         }
     }

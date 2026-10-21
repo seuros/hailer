@@ -73,6 +73,8 @@ pub struct Config {
     pub threads: u16,
     #[serde(default = "default_pool_size")]
     pub database_pool_size: u32,
+    #[serde(default = "default_shutdown_timeout")]
+    pub shutdown_timeout_seconds: u64,
     pub feedback: Option<FeedbackConfig>,
     pub suppression_sync: Option<SuppressionSyncConfig>,
     pub rate_limit: Option<RateLimitConfig>,
@@ -107,6 +109,10 @@ const fn default_pool_size() -> u32 {
     5
 }
 
+const fn default_shutdown_timeout() -> u64 {
+    30
+}
+
 const fn default_threads() -> u16 {
     2
 }
@@ -116,6 +122,7 @@ impl Default for Config {
         Self {
             threads: default_threads(),
             database_pool_size: default_pool_size(),
+            shutdown_timeout_seconds: default_shutdown_timeout(),
             feedback: None,
             suppression_sync: None,
             rate_limit: None,
@@ -138,6 +145,12 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.threads == 0 {
             return Err(ConfigError::InvalidEnv("threads", "must be at least 1"));
+        }
+        if !(1..=300).contains(&self.shutdown_timeout_seconds) {
+            return Err(ConfigError::InvalidConfig(
+                "shutdown_timeout_seconds",
+                "must be in 1..300",
+            ));
         }
         if !(1..=64).contains(&self.database_pool_size) {
             return Err(ConfigError::InvalidConfig("database_pool_size", "must be in 1..64"));

@@ -23,6 +23,7 @@ path = "src/main.rs"
 [dependencies]
 # Core async runtime
 tokio = { version = "1.53", features = ["full", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # Docking protocol (frame types + HTTP-bay codec; no client helper, hailer
 # writes its own Dock/Moored handshake + Hail/Haul/Reply loop in src/bay/)
