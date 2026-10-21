@@ -1,6 +1,16 @@
-# Keep this file and its state volume private. One Hailer process owns this file.
-state_path = "/var/lib/hailer/state.redb"
+# Set HAILER_DATABASE_URL separately; do not commit credentials.
 threads = 2
+database_pool_size = 5
+shutdown_timeout_seconds = 30
+
+# Opt in: initial AWS account/region sync gates send readiness.
+[suppression_sync]
+interval_seconds = 3600
+
+# Optional PER-PROCESS budget, not an account-wide SES quota.
+# [rate_limit]
+# recipients_per_second = 10.0
+# burst = 50
 
 [feedback]
 # Dedicated queue; subscribe the SNS topic with RawMessageDelivery=false.

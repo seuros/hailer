@@ -56,6 +56,8 @@ struct Args {
 enum Command {
     /// Apply Hailer's PostgreSQL schema migrations without docking
     Migrate,
+    /// Copy a cleanly stopped 0.1 redb file into an empty PostgreSQL target
+    MigrateRedb(ImportArgs),
     /// Import an exported JSON array of suppressions without docking
     ImportSuppressions(ImportArgs),
     /// Merge the current AWS account/region suppression list into PostgreSQL
@@ -99,6 +101,11 @@ async fn main() -> anyhow::Result<()> {
     let store = state::Store::connect(&database_url, config.database_pool_size).await?;
     if matches!(args.command, Some(Command::Migrate)) {
         println!("{}", serde_json::json!({"migrated": true}));
+        return Ok(());
+    }
+    if let Some(Command::MigrateRedb(ImportArgs { file })) = args.command {
+        let report = store.migrate_redb(std::path::Path::new(&file)).await?;
+        println!("{}", serde_json::to_string(&report)?);
         return Ok(());
     }
     if let Some(Command::ImportSuppressions(ImportArgs { file })) = args.command {

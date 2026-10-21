@@ -2,7 +2,7 @@
 
 Rails writes the email. Hailer deals with sending it.
 
-This repository ships two things at version **0.1.0**:
+This repository prepares two things at version **0.2.0** (not published yet):
 
 - **`hailer` gem** — an ActionMailer adapter, feedback client, and executable
   launcher. Platform gems bundle the Rust binary. No Ruby AWS SDK or native extension.
@@ -78,7 +78,7 @@ name = "hailer"
 command = "hailer"
 workers = 0
 threads = 2
-routes = [{ bind = "mail", pattern = "^/internal/mail/send$" }]
+routes = [{ bind = "mail", pattern = "^/internal/mail/(send|events|health|ready)$" }]
 ```
 
 Mothership exports `MS_PID`, `MS_SHIP`, and `MS_SOCKET_DIR`. Hailer binds its
@@ -90,6 +90,31 @@ Give the **service**, not the Rails adapter, AWS region and credentials through
 the standard AWS credential chain. Its identity needs `ses:SendEmail`, and the
 SES account/identities must be configured for sending.
 
+### PostgreSQL
+
+PostgreSQL is the **only live backend** in 0.2. Hailer owns a `hailer` schema,
+not Rails tables. Use a separate database/role where practical:
+
+```sh
+export HAILER_DATABASE_URL='postgres://hailer:password@db/hailer?sslmode=verify-full'
+hailer migrate
+```
+
+Supply the database CA through the normal PostgreSQL connection options.
+Use certificate verification in deployment; a private network is not TLS.
+Keep the URL in a secret manager, not TOML or a committed initializer.
+Startup also applies embedded, versioned migrations. The bootstrap identity
+needs database `CREATE` and ownership of its schema/tables. Runtime startup
+currently runs that same bootstrap/migrator, so provision the service role for
+it too; a separate DML-only runtime mode is not implemented.
+The runtime never needs Rails schema ownership. Back up the database with your
+normal PostgreSQL backup/restore tooling.
+
+Configuration defaults: pool size 5 (range 1–64), shutdown timeout 30 seconds
+(range 1–300). Every replica shares PostgreSQL; each has its own pool and optional
+rate budget. Set your supervisor/container stop grace longer than Hailer's
+shutdown timeout. PostgreSQL 18 is exercised locally and in CI.
+
 ## Bounces, complaints, and suppressions
 
 ```text
@@ -97,7 +122,7 @@ SES → SNS → dedicated SQS queue → Hailer → durable events + suppressions
 ```
 
 Hailer atomically commits each event, deduplication key, and suppression change
-to a local redb database **before** acknowledging SQS. Failed acknowledgements
+to PostgreSQL **before** acknowledging SQS. Failed acknowledgements
 can be retried without duplicating stored events. Invalid/untrusted messages
 are left for SQS's dead-letter policy.
 
@@ -113,14 +138,16 @@ are left for SQS's dead-letter policy.
 Copy [hailer.example.toml](hailer.example.toml), set the real queue/topic, and
 pass `--config /path/to/hailer.toml` or `HAILER_CONFIG`. Without `[feedback]`,
 the consumer is disabled, but previously stored suppressions are still enforced.
-`HAILER_STATE_PATH` overrides `state_path`; the default is `data/hailer.redb`.
-Use a persistent, private volume in production.
+`HAILER_DATABASE_URL` is required, even with feedback disabled.
+The old `state_path`, `--state-path`, and `HAILER_STATE_PATH` are not supported.
+Replicas may consume the same dedicated queue when they share the same Hailer
+database. Commits serialize cursor allocation so a reader cannot skip an earlier
+transaction that has not committed yet.
 
-**One Hailer process owns one state file and one dedicated queue.** Run the
-bay with `workers = 0`; this is not a distributed suppression database.
-Do not run competing consumers with separate state files. Back up the state
-file while Hailer is stopped; event history and deduplication currently have
-no automatic retention/pruning.
+Event history and deduplication have **no automatic retention/pruning**.
+Do not delete events casually: event IDs also carry the SQS deduplication
+contract, and Rails consumers may still need their cursors. Plan retention
+against consumer lag and redelivery windows before adding a pruning policy.
 
 Hailer also exposes a provider-neutral, nondestructive event feed:
 
@@ -157,7 +184,59 @@ updates in one application database transaction. Retried pages require
 idempotent handlers; no hidden poller, scheduling, or checkpoint database is
 started by the gem. Reading does not acknowledge or erase events.
 
-See [feedback setup and migration](docs/feedback.md) before removing a receiver.
+The SQS policy must allow only the intended SNS topic, using `aws:SourceArn`
+and account restrictions. Subscribe with `RawMessageDelivery=false`, restrict
+direct `sqs:SendMessage`, set a dead-letter queue, and monitor its depth.
+The SNS topic allowlist in TOML is defense in depth, not signature verification.
+Hailer needs `sqs:ReceiveMessage` and `sqs:DeleteMessage` on that queue, plus
+applicable KMS decrypt permissions if customer-managed encryption is used.
+
+### Import AWS suppressions
+
+```sh
+hailer sync-suppressions
+# If AWS expires a saved pagination token:
+hailer sync-suppressions --restart
+# Existing application export, JSON array:
+hailer import-suppressions --file suppressions.json
+```
+
+The service identity needs `ses:ListSuppressedDestinations`; STS
+`GetCallerIdentity` identifies the account (AWS does not require an explicit
+allow for that operation). The configured region is part of the source identity.
+These commands **read AWS only**; they never mutate the account suppression list.
+Missing AWS entries do not unsuppress local entries, and a bounce never
+downgrades a complaint. Imports do not fabricate delivery-history events.
+Account-level AWS data does not include every possible global SES suppression.
+
+Enable `[suppression_sync]` as in the example to reconcile on startup and hourly.
+The first complete sync gates send readiness. Later errors mark health degraded,
+retain committed pages, and retry safe reads with bounded backoff. A token is
+stored with its page in one transaction. Replicas coordinate a source-scoped
+advisory lock; they cannot advance the same checkpoint concurrently.
+An expired token deliberately requires the operator's `--restart`. Omitting
+the section disables scheduled sync, not existing suppression enforcement.
+
+### Control plane
+
+The behavior circuit evaluates **pure admission decisions**: input validity,
+service/storage readiness, suppression, and local rate admission. PostgreSQL,
+AWS calls, clocks, and token reservations remain owned by the async host.
+The SES circuit breaker counts transient/ambiguous failures, not bad addresses
+or permanent request rejections. An optional `[rate_limit]` budgets envelope
+recipients **per process**, not per account; it does not discover SES quotas.
+
+Private `GET /internal/mail/health` returns sanitized component states and
+counters. `GET /internal/mail/ready` returns 503 during initial sync or storage
+failure, otherwise 200. A provider circuit can be degraded while readiness
+remains true so protected half-open probes can recover it. No credentials,
+recipient addresses, message bodies, or pagination tokens appear in these sensors.
+They are operational signals, not a guarantee SES will accept a message.
+
+TERM/ctrl-c stops admission and SQS receives, then drains owned requests and
+the current feedback commit/ack within the configured deadline. Idle links
+close immediately. Deadline expiry aborts remaining tasks and exits nonzero;
+an interrupted send can have an unknown outcome.
 
 **Security:** the route currently has no application-level authentication.
 `/internal/` is a name, not an access control. Keep the bind private. The client
@@ -172,6 +251,8 @@ it. A successful response must include a nonblank `message_id`.
 | --- | --- |
 | HTTP 400 / 422 | `Hailer::ValidationError` |
 | HTTP 502 | `Hailer::RejectedError` |
+| HTTP 429 | `Hailer::RateLimitedError` |
+| HTTP 503, `code: "outcome_unknown"` | `Hailer::AmbiguousDeliveryError` |
 | HTTP 503 | `Hailer::UnavailableError` |
 | Other non-200 status | `Hailer::DeliveryError` |
 | Invalid/oversized response, missing message ID | `Hailer::ProtocolError` |
@@ -182,18 +263,35 @@ The gem does not retry. A lost response can happen **after** SES accepted the
 message; retrying may duplicate it. There is no durable **outbound** queue or
 send-idempotency store yet; feedback deduplication does not deduplicate sends.
 Rails jobs can also retry, so configure them deliberately.
-The current service maps all SES SDK send errors to HTTP 502; that status is
-not yet a reliable distinction between permanent and transient AWS failures.
+The SES SDK makes **one send attempt**. AWS throttling/transient failures return
+503, permanent service rejections 502, and disconnects/timeouts/missing message
+IDs carry the explicit unknown-outcome code. None of these responses authorizes
+an automatic retry of an ambiguous send.
 
 ## Status and migration
 
 The delivery contract and Hailer-side feedback processing are implemented. CommonShare's
 existing sender is the compatibility reference, not a runtime dependency.
-See [the contract](docs/delivery-contract.md).
+
+### Upgrade from 0.1 redb
+
+1. Stop all old Hailer processes cleanly. Keep the source file and a backup.
+2. Provision an **empty** Hailer PostgreSQL database and set its URL.
+3. Run `hailer migrate-redb --file /private/path/state.redb`.
+4. Check reported counts, event cursors, and suppression enforcement before
+   starting 0.2. Keep the source backup; do not restart old writers after cutover.
+
+Migration opens redb read-only, checks event/dedup mappings and suppression keys,
+and copies bounded batches in **one destination transaction**. It preserves
+event IDs, sequence values, suppression metadata, and next-cursor continuity.
+It rejects missing/corrupt sources and nonempty targets without wiping anything.
+An unclean redb file may require recovery with the old version against a backup
+before migration. There is no implicit fallback and no dual-write period.
 
 Before switching an existing app:
 
-1. Run Hailer on a private Mothership bind and verify real SES delivery.
+1. Provision PostgreSQL, run Hailer on a private Mothership bind, check readiness,
+   and verify real SES delivery using a deliberate test.
 2. Add the gem, set `HAILER_URL`, and remove the app's old delivery-method
    override so Hailer's default takes effect.
 3. Subscribe a dedicated SQS queue before exporting and importing existing
@@ -206,18 +304,17 @@ CommonShare's local integration is tested with its real application, database,
 Mothership, packaged Hailer binary, and a loopback SES fixture. Its existing AWS
 receivers remain until the real subscription and suppression cutover is verified.
 No deployed AWS routing has been changed.
-Account diagnostics, validation/behavior plugins,
-distributed state, rate limiting, graceful draining, and reliable send-error
-classification are later work. No plugin API is promised yet.
+Validation/behavior plugins, a durable outbound queue, distributed account-wide
+quotas, and send idempotency remain later work. No plugin API is promised yet.
 
 ## Development
 
 ```sh
 bundle install
 bundle exec rake
-cargo test --locked
+HAILER_TEST_DATABASE_URL=postgres://test_user:password@127.0.0.1/hailer_test cargo test --locked
 cargo fmt --all -- --check
-gem build hailer.gemspec --output /tmp/hailer-0.1.0.gem
+gem build hailer.gemspec --output /tmp/hailer-0.2.0.gem
 bundle exec rake native:package
 ```
 
@@ -225,10 +322,13 @@ The Ruby suite exercises real local HTTP exchanges and a booted Rails app.
 The Rust suite checks the same JSON fixture and the docking exchange with a
 fake provider. Feedback tests cover redelivery, acknowledgement ordering,
 atomic rollback, restart persistence, imports, and suppression enforcement.
-Neither suite sends real mail or requires AWS credentials.
+Rust tests require an isolated PostgreSQL server and a test role with `CREATEDB`;
+each test creates and drops its own database. Never point this variable at a
+customer or Rails production database. Neither suite sends real mail or requires
+AWS credentials.
 
 `native:package` builds a locked release and writes
-`pkg/hailer-0.1.0-<platform>.gem`. Each platform gem contains exactly its host
+`pkg/hailer-0.2.0-<platform>.gem`. Each platform gem contains exactly its host
 binary and a version/platform/SHA-256 manifest. The launcher verifies that
 manifest before `exec`, preserving arguments, exit status, and signal handling.
 `HAILER_BINARY` is an explicit, version-checked source-build override; there is
@@ -244,13 +344,13 @@ and `aarch64-linux-gnu` natively against Debian 12 (glibc 2.36). These artifacts
 require glibc 2.36 or newer; they are not Alpine/musl builds.
 
 ```sh
-gh workflow run linux-gems.yml --repo seuros/hailer -f tag=v0.1.0
+gh workflow run linux-gems.yml --repo seuros/hailer -f tag=v0.2.0
 ```
 
 The workflow checks out the requested release tag, runs the Ruby and Rust
 suites, and installs each binary gem in a separate slim Debian container.
 It verifies the installed platform, bundled-binary manifest, executable version,
-and offline suppression import before attaching either Linux gem to the
+and PostgreSQL suppression import before attaching either Linux gem to the
 existing release. Existing gem assets are never overwritten; `SHA256SUMS` is
 updated to cover all release gems.
 
@@ -261,7 +361,7 @@ release assets can be fetched and published with Rake:
 bundle exec rake gems:fetch
 bundle exec rake gems:push_all
 # Or select an explicit release:
-bundle exec rake 'gems:push_all[v0.1.0]'
+bundle exec rake 'gems:push_all[v0.2.0]'
 ```
 
 `gems:push_all` fetches fresh assets, checks every archive's SHA-256,
