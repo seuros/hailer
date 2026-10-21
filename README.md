@@ -300,8 +300,9 @@ Before switching an existing app:
    and any provider-neutral app history consumer have been verified.
 5. Only then remove the old sender and AWS-specific feedback handling.
 
-CommonShare's local integration is tested with its real application, database,
-Mothership, packaged Hailer binary, and a loopback SES fixture. Its existing AWS
+CommonShare's local 0.2 integration is tested with its real application,
+test database, Mothership, the new source-built binary, its installed 0.1 Ruby
+client, and a loopback SES fixture. Its existing AWS
 receivers remain until the real subscription and suppression cutover is verified.
 No deployed AWS routing has been changed.
 Validation/behavior plugins, a durable outbound queue, distributed account-wide
@@ -327,6 +328,19 @@ each test creates and drops its own database. Never point this variable at a
 customer or Rails production database. Neither suite sends real mail or requires
 AWS credentials.
 
+For the opt-in CommonShare compatibility smoke, create a disposable Hailer
+database, then run from that application's checkout:
+
+```sh
+RAILS_ENV=test HAILER_SMOKE_BINARY=/path/to/hailer/target/debug/hailer \
+  HAILER_DATABASE_URL=postgres://test_user:password@127.0.0.1/hailer_smoke \
+  bundle exec rails runner /path/to/hailer/test/commonshare_smoke.rb
+```
+
+It refuses a non-test app database, points the AWS SDK at a loopback fixture,
+and rolls back application-history changes. It does not change the app's
+dependency lockfile or send external mail.
+
 `native:package` builds a locked release and writes
 `pkg/hailer-0.2.0-<platform>.gem`. Each platform gem contains exactly its host
 binary and a version/platform/SHA-256 manifest. The launcher verifies that
@@ -348,7 +362,10 @@ gh workflow run linux-gems.yml --repo seuros/hailer -f tag=v0.2.0
 ```
 
 The workflow checks out the requested release tag, runs the Ruby and Rust
-suites, and installs each binary gem in a separate slim Debian container.
+suites against an isolated PostgreSQL 18 service, and installs each binary gem
+in a separate slim Debian container. Pushes/PRs also verify the branch without
+creating a release or publishing anything; only explicit workflow dispatch
+can attach assets to an existing release.
 It verifies the installed platform, bundled-binary manifest, executable version,
 and PostgreSQL suppression import before attaching either Linux gem to the
 existing release. Existing gem assets are never overwritten; `SHA256SUMS` is
