@@ -89,6 +89,8 @@ begin
   }, mothership, 'run', '-c', manifest, out: log, err: log, pgroup: true)
   Timeout.timeout(30) do
     loop do
+      raise 'Mothership exited before readiness' if Process.wait(pid, Process::WNOHANG)
+
       begin
         response = Net::HTTP.new('127.0.0.1', port, nil).get('/internal/mail/ready')
         break if response.code == '200' && JSON.parse(response.body).fetch('ready')
@@ -124,17 +126,23 @@ rescue StandardError
 ensure
   if pid
     begin
-      Process.kill('TERM', -pid)
-      Timeout.timeout(10) { Process.wait(pid) }
+      # A failed bay can make Mothership exit before readiness. Reap it
+      # without signaling a process group that no longer belongs to us.
+      unless Process.wait(pid, Process::WNOHANG)
+        Process.kill('TERM', pid)
+        Timeout.timeout(10) { Process.wait(pid) }
+      end
     rescue Timeout::Error
-      Process.kill('KILL', -pid)
-      Process.wait(pid)
+      unless Process.wait(pid, Process::WNOHANG)
+        Process.kill('KILL', -pid)
+        Process.wait(pid)
+      end
     rescue Errno::ESRCH, Errno::ECHILD
       nil
     end
   end
-  listener.close
   fixture.kill
   fixture.join
+  listener.close
   FileUtils.remove_entry(directory)
 end

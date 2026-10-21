@@ -301,7 +301,7 @@ Before switching an existing app:
 5. Only then remove the old sender and AWS-specific feedback handling.
 
 CommonShare's local 0.2 integration is tested with its real application,
-test database, Mothership, the new source-built binary, its installed 0.1 Ruby
+test database, Mothership, the optimized binary from the macOS gem, its installed 0.1 Ruby
 client, and a loopback SES fixture. Its existing AWS
 receivers remain until the real subscription and suppression cutover is verified.
 No deployed AWS routing has been changed.
