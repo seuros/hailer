@@ -248,10 +248,21 @@ an interrupted send can have an unknown outcome.
 `/internal/` is a name, not an access control. Keep the bind private. The client
 does not follow redirects or use environment HTTP proxies.
 
+## Impossible addresses
+
+Always on, no configuration: `toto@example.com` is syntactically a real
+address, but RFC 2606 reserves `example.com`/`.net`/`.org` and the
+`test`/`example`/`invalid`/`localhost` TLDs for documentation - no real
+mailbox ever lives there. Rejected at the same boundary as a malformed
+address (`SendRequest::validate`), before any guard in the chain runs, for
+both the synchronous and queued adapters. Not a policy choice like the
+domain blocklist below - there is nothing to configure or an operator could
+turn off.
+
 ## Domain blocklist
 
 ```text
-SendRequest -> domain blocklist (free, local) -> suppression (free, local) -> verification (paid, external) -> SES
+SendRequest -> impossible-address check -> domain blocklist (free, local) -> suppression (free, local) -> verification (paid, external) -> SES
 ```
 
 Always active - an empty `hailer.domain_blocks` table is a no-op, there is
@@ -300,6 +311,37 @@ middleware is never a new reason a real send stops working unless a
 deployment explicitly adds those states to `reject_states`. Adding another
 provider (ZeroBounce, NeverBounce, ...) means a new `Verifier` enum variant in
 `src/verify.rs`; nothing else in the send path changes.
+
+### Bulk pre-screening (batch)
+
+A separate concern from the real-time guard above: pre-verify a whole list
+*before* ever trying to send to it, not a per-send check. Emailable's batch
+API is async (submit, then poll) and only returns per-address results inline
+for batches up to 1,000 - larger ones get a ZIP/CSV download link this client
+deliberately does not fetch or parse, to avoid a zip/csv dependency:
+
+```sh
+hailer verify-batch --file addresses.txt   # one address per line, max 1000
+hailer batch-status --id BATCH_ID          # poll; caches each verdict once complete
+```
+
+`batch-status` writes every returned verdict into `hailer.address_verifications`
+(the same cache the real-time guard reads), so a later send to an
+already-screened address reuses the cached verdict instead of paying for
+another single-address check. A batch over 1,000 addresses is reported with
+its `download_file` URL but is not cached - split into smaller batches
+instead.
+
+`verify-batch` never submits an address that does not need it: exact
+duplicate lines (by the same normalized key the cache itself is keyed by -
+`USER+alias@x` and `user@x` are the same address), and anything already in
+`hailer.address_verifications` with an unexpired verdict, are dropped before
+the batch is ever submitted - never spending a credit on them. Every
+exclusion is counted and reported (`invalid_lines`, `duplicate_lines`,
+`already_cached`), never silently dropped. `hailer emailable-account` checks
+the Emailable account's remaining credits directly; `submit_batch` itself
+also checks this before submitting and refuses (without ever reaching the
+server) if the account has none left or fewer than the batch needs.
 
 ## Failure semantics
 

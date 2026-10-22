@@ -10,9 +10,9 @@ use std::assert_matches;
 
 fn request() -> SendRequest {
     SendRequest {
-        raw_mime: "From: alice@example.com\r\nTo: bob@example.com\r\n\r\nTest".into(),
+        raw_mime: "From: alice@example.dev\r\nTo: bob@example.dev\r\n\r\nTest".into(),
         from_email_address: None,
-        to_addresses: vec!["bob@example.com".into()],
+        to_addresses: vec!["bob@example.dev".into()],
         cc_addresses: vec![],
         bcc_addresses: vec![],
     }

@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use super::FeedbackEvent;
 
 pub const TOPIC: &str = "arn:aws:sns:us-east-1:123456789012:mail-feedback";
-pub const ADDRESS: &str = "user+alias@example.com";
+pub const ADDRESS: &str = "user+alias@example.dev";
 
 pub fn ses(event_type: &str) -> Value {
     let mut event = json!({
@@ -12,7 +12,7 @@ pub fn ses(event_type: &str) -> Value {
             "messageId": "ses-message-1",
             "timestamp": "2026-10-20T12:00:00Z",
             "destination": [ADDRESS],
-            "headers": [{"name": "Message-ID", "value": "<rails-message@example.com>"}]
+            "headers": [{"name": "Message-ID", "value": "<rails-message@example.dev>"}]
         }
     });
     let (key, detail) = match event_type {

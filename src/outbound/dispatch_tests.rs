@@ -124,22 +124,22 @@ async fn durable_allowed_subset_matches_the_transport_and_original_body_is_uncha
         .submit(submission("partial"), &budget(), &Intel::Disabled, None)
         .await
         .expect("accept");
-    block(&store, "to@example.com").await;
+    block(&store, "to@example.dev").await;
     let dispatch = ticket(&store).await;
     assert_eq!(dispatch.request.to_addresses, [] as [String; 0]);
-    assert_eq!(dispatch.request.bcc_addresses, ["blind@example.com"]);
+    assert_eq!(dispatch.request.bcc_addresses, ["blind@example.dev"]);
     assert_eq!(dispatch.request.raw_mime, submission("partial").raw_mime);
     let status =
         store.message_status(&receipt.hailer_message_id).await.expect("status").expect("message");
     assert_eq!(status.attempts[0]["envelope"]["to_addresses"], serde_json::json!([]));
-    assert_eq!(status.attempts[0]["excluded"][0]["recipient"], "to@example.com");
+    assert_eq!(status.attempts[0]["excluded"][0]["recipient"], "to@example.dev");
     let Json(original): Json<serde_json::Value> =
         sqlx::query_scalar("SELECT envelope FROM hailer.messages WHERE id = $1")
             .bind(&receipt.hailer_message_id)
             .fetch_one(&store.pool)
             .await
             .expect("original envelope");
-    assert_eq!(original["to_addresses"], serde_json::json!(["to@example.com"]));
+    assert_eq!(original["to_addresses"], serde_json::json!(["to@example.dev"]));
     store
         .finish_dispatch(&dispatch.correlation, &DispatchOutcome::Accepted("ses-partial".into()))
         .await
@@ -168,8 +168,8 @@ async fn all_suppressed_and_expired_queued_work_purge_without_dispatch() {
         .submit(submission("blocked"), &budget(), &Intel::Disabled, None)
         .await
         .expect("accept");
-    block(&store, "to@example.com").await;
-    block(&store, "blind@example.com").await;
+    block(&store, "to@example.dev").await;
+    block(&store, "blind@example.dev").await;
     let claim = store.claim_message().await.expect("claim").expect("work");
     assert!(store.prepare_dispatch(&claim, &control()).await.expect("suppressed").is_none());
     let status =
@@ -354,7 +354,7 @@ async fn trusted_unique_feedback_resolves_unknown_and_later_bounces_do_not_reope
         .expect("accept");
     let dispatch = ticket(&store).await;
     store.finish_dispatch(&dispatch.correlation, &DispatchOutcome::Unknown).await.expect("unknown");
-    let mut unrelated = feedback(&dispatch, "ses-related", "Delivery", "to@example.com");
+    let mut unrelated = feedback(&dispatch, "ses-related", "Delivery", "to@example.dev");
     unrelated.correlation = None; // Similar address/Message-ID is not evidence.
     store.record(&unrelated).await.expect("legacy event");
     assert_eq!(
@@ -366,10 +366,10 @@ async fn trusted_unique_feedback_resolves_unknown_and_later_bounces_do_not_reope
             .status,
         "held_unknown"
     );
-    let delivered = feedback(&dispatch, "ses-confirmed", "Delivery", "to@example.com");
+    let delivered = feedback(&dispatch, "ses-confirmed", "Delivery", "to@example.dev");
     store.record(&delivered).await.expect("correlate");
     assert!(!store.record(&delivered).await.expect("dedup"));
-    let mut bounce = feedback(&dispatch, "ses-confirmed", "Bounce", "to@example.com");
+    let mut bounce = feedback(&dispatch, "ses-confirmed", "Bounce", "to@example.dev");
     bounce.correlation = None; // A previously captured provider ID is unique evidence.
     store.record(&bounce).await.expect("late untagged bounce");
     let status =
@@ -379,10 +379,10 @@ async fn trusted_unique_feedback_resolves_unknown_and_later_bounces_do_not_reope
     assert_eq!(status.recipient_outcomes.as_array().expect("facts").len(), 2);
     assert!(
         store
-            .blocked(&["to@example.com".into()])
+            .blocked(&["to@example.dev".into()])
             .await
             .expect("suppression")
-            .contains("to@example.com")
+            .contains("to@example.dev")
     );
     assert!(store.claim_message().await.expect("no resend").is_none());
 }
@@ -440,7 +440,7 @@ async fn invalid_feedback_correlation_cannot_resolve_another_attempt() {
     let two = ticket(&store).await;
     store.finish_dispatch(&two.correlation, &DispatchOutcome::Unknown).await.expect("unknown");
     let wrong_address =
-        feedback(&one, "wrong-recipient", "Delivery", "not-in-envelope@example.com");
+        feedback(&one, "wrong-recipient", "Delivery", "not-in-envelope@example.dev");
     store.record(&wrong_address).await.expect("legacy observation only");
     assert_eq!(
         store
@@ -452,10 +452,10 @@ async fn invalid_feedback_correlation_cannot_resolve_another_attempt() {
         "held_unknown"
     );
     store
-        .record(&feedback(&one, "shared-provider-id", "Delivery", "to@example.com"))
+        .record(&feedback(&one, "shared-provider-id", "Delivery", "to@example.dev"))
         .await
         .expect("positive evidence");
-    let mut collision = feedback(&two, "shared-provider-id", "Delivery", "to@example.com");
+    let mut collision = feedback(&two, "shared-provider-id", "Delivery", "to@example.dev");
     collision.event_id.push_str("-different-notification");
     store.record(&collision).await.expect("ambiguous mapping remains legacy-only");
     assert_eq!(
@@ -483,10 +483,10 @@ async fn correlated_feedback_failure_rolls_back_feedback_suppression_and_spool_t
         BEGIN IF NEW.kind = 'recipient_observed' THEN RAISE EXCEPTION 'injected'; END IF; RETURN NEW; END $$; \
         CREATE TRIGGER fail_correlated BEFORE INSERT ON hailer.message_events FOR EACH ROW EXECUTE FUNCTION hailer.fail_correlated()")
         .execute(&store.pool).await.expect("fault");
-    let event = feedback(&dispatch, "ses-atomic", "Bounce", "to@example.com");
+    let event = feedback(&dispatch, "ses-atomic", "Bounce", "to@example.dev");
     assert!(store.record(&event).await.is_err());
     assert!(store.events(0, 100).await.expect("feedback").events.is_empty());
-    assert!(store.blocked(&["to@example.com".into()]).await.expect("suppression").is_empty());
+    assert!(store.blocked(&["to@example.dev".into()]).await.expect("suppression").is_empty());
     let status =
         store.message_status(&receipt.hailer_message_id).await.expect("status").expect("message");
     assert_eq!(status.status, "held_unknown");
@@ -522,7 +522,7 @@ async fn status_observation_windows_are_bounded_and_explicitly_truncated() {
         .await
         .expect("accept");
     for index in 0..101 {
-        let mut event = feedback(&dispatch, "ses-opens", "Open", "to@example.com");
+        let mut event = feedback(&dispatch, "ses-opens", "Open", "to@example.dev");
         event.event_id = format!("observation-{index}");
         store.record(&event).await.expect("observation");
     }

@@ -19,9 +19,9 @@ pub(super) fn budget() -> QueuedConfig {
 pub(super) fn submission(key: &str) -> Submission {
     serde_json::from_value(serde_json::json!({
         "submission_key": key,
-        "raw_mime": "From: from@example.com\r\nMessage-ID: <intent@example.com>\r\n\r\nHello",
-        "to_addresses": ["to@example.com"],
-        "bcc_addresses": ["blind@example.com"]
+        "raw_mime": "From: from@example.dev\r\nMessage-ID: <intent@example.dev>\r\n\r\nHello",
+        "to_addresses": ["to@example.dev"],
+        "bcc_addresses": ["blind@example.dev"]
     }))
     .expect("submission")
 }
@@ -165,7 +165,7 @@ async fn intake_commits_payload_receipt_lifecycle_and_feed_together() {
     assert_eq!(status.version, 0);
     assert!(status.body_present);
     assert!(status.provider_message_id.is_none());
-    assert_eq!(status.rfc_message_id.as_deref(), Some("<intent@example.com>"));
+    assert_eq!(status.rfc_message_id.as_deref(), Some("<intent@example.dev>"));
     assert_eq!(status.receipt, receipt);
     let start = receipt.accepted_at.parse::<jiff::Timestamp>().expect("start");
     let expiry = receipt.expires_at.parse::<jiff::Timestamp>().expect("expiry");
@@ -184,7 +184,7 @@ async fn intake_commits_payload_receipt_lifecycle_and_feed_together() {
     assert_eq!(payload, submission("intent").raw_mime.as_bytes());
     let Json(envelope): Json<serde_json::Value> = row.try_get("envelope").expect("envelope");
     assert!(envelope.get("raw_mime").is_none());
-    assert_eq!(envelope["bcc_addresses"], serde_json::json!(["blind@example.com"]));
+    assert_eq!(envelope["bcc_addresses"], serde_json::json!(["blind@example.dev"]));
 }
 
 #[tokio::test]
@@ -218,7 +218,7 @@ async fn concurrent_identical_commands_get_one_receipt_and_conflicts_never_overw
         let mut command = submission("same");
         match change {
             "body" => command.raw_mime.push('!'),
-            "recipient" => command.bcc_addresses.push("different@example.com".into()),
+            "recipient" => command.bcc_addresses.push("different@example.dev".into()),
             _ => command.expires_at = Some("2030-01-01T00:00:00Z".into()),
         }
         assert_matches!(
@@ -439,11 +439,11 @@ fn lifecycle_restore_rejects_schema_or_index_drift_and_unknown_never_expires() {
 fn message_id_metadata_is_bounded_unambiguous_and_never_guessed_from_body() {
     assert_eq!(
         original_message_id(
-            "From: from@example.com\r\nmEsSaGe-Id: <original@example.com>\r\n\r\nbody"
+            "From: from@example.dev\r\nmEsSaGe-Id: <original@example.dev>\r\n\r\nbody"
         ),
-        Some("<original@example.com>".into())
+        Some("<original@example.dev>".into())
     );
-    assert_eq!(original_message_id("From: from@example.com\r\n\r\nMessage-ID: <body>"), None);
+    assert_eq!(original_message_id("From: from@example.dev\r\n\r\nMessage-ID: <body>"), None);
     assert_eq!(original_message_id("Message-ID: <one>\r\nMessage-ID: <two>\r\n\r\nbody"), None);
     assert_eq!(original_message_id("Message-ID: <one>"), None);
     assert_eq!(

@@ -31,7 +31,7 @@ fn hard_bounces_and_complaints_become_provider_neutral_events() {
                 .expect("valid feedback");
         assert_eq!(event.kind, expected);
         assert_eq!(event.suppression, suppression);
-        assert_eq!(event.message_id.as_deref(), Some("<rails-message@example.com>"));
+        assert_eq!(event.message_id.as_deref(), Some("<rails-message@example.dev>"));
         assert_eq!(event.provider_message_id, "ses-message-1");
         assert_eq!(event.recipients, [ADDRESS]);
         let serialized = serde_json::to_value(&event).expect("normalized event");
@@ -65,7 +65,7 @@ fn legacy_ses_notification_type_and_case_insensitive_message_id_are_supported() 
     payload["mail"]["headers"][0]["name"] = json!("message-id");
     let event =
         FeedbackEvent::from_sns(&notification("legacy", &payload), TOPIC).expect("legacy SES");
-    assert_eq!(event.message_id.as_deref(), Some("<rails-message@example.com>"));
+    assert_eq!(event.message_id.as_deref(), Some("<rails-message@example.dev>"));
 }
 
 #[test]
@@ -111,7 +111,7 @@ impl FeedbackQueue for FakeQueue {
     async fn delete(&self, receipt: &str) -> anyhow::Result<()> {
         // Acknowledge only after BOTH the event and suppression are readable.
         assert_eq!(self.store.events(0, 100).await?.events.len(), 1);
-        assert!(self.store.blocked(&[ADDRESS.into()]).await?.contains("user@example.com"));
+        assert!(self.store.blocked(&[ADDRESS.into()]).await?.contains("user@example.dev"));
         anyhow::ensure!(!self.fail_delete.load(Ordering::SeqCst), "simulated SQS delete failure");
         self.acknowledged.lock().expect("acknowledgements").push(receipt.into());
         Ok(())

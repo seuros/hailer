@@ -1,8 +1,142 @@
+#[cfg(test)]
+mod tests;
+
+use std::time::Duration;
+
 use anyhow::ensure;
 
 use crate::outbound::{Resolution, valid_id};
 use crate::state::Store;
-use crate::{BanDomainArgs, CancelArgs, Command, MessageIdArgs, UnbanDomainArgs};
+use crate::verify::emailable::{BatchStatus, EmailableClient};
+use crate::{
+    BanDomainArgs, BatchStatusArgs, CancelArgs, Command, MessageIdArgs, UnbanDomainArgs,
+    VerifyBatchArgs,
+};
+
+/// `EMAILABLE_API_KEY` is read here, not from `hailer.toml` - same rule as
+/// the real-time guard's own `build_verifier` in main.rs. Independent of
+/// whether `[email_verification]` is configured; an operator may want to
+/// pre-screen a list without the live guard enabled yet.
+fn emailable_client() -> anyhow::Result<EmailableClient> {
+    let api_key = std::env::var("EMAILABLE_API_KEY")
+        .map_err(|_| anyhow::anyhow!("set EMAILABLE_API_KEY to use batch verification"))?;
+    Ok(EmailableClient::new(api_key, 5))
+}
+
+/// Caches every verdict (best-effort - a cache write failure never fails
+/// the command, the batch result itself is still reported) and builds the
+/// per-address summary for the CLI's JSON output.
+async fn cache_batch_verdicts(
+    store: &Store,
+    verdicts: &[(String, crate::verify::Verdict)],
+    ttl: Duration,
+) -> (usize, serde_json::Map<String, serde_json::Value>) {
+    let mut cached = 0;
+    let mut results = serde_json::Map::new();
+    for (address, verdict) in verdicts {
+        if store.cache_verdict(address, verdict, ttl).await.is_ok() {
+            cached += 1;
+        }
+        results.insert(address.clone(), serde_json::json!(verdict.state.as_str()));
+    }
+    (cached, results)
+}
+
+/// Outcome counts for [`dedupe_against_cache`], everything except the
+/// addresses actually worth submitting.
+#[derive(Default, serde::Serialize)]
+struct DedupeReport {
+    invalid_lines: usize,
+    duplicate_lines: usize,
+    already_cached: usize,
+}
+
+/// Drops exact duplicate lines (by [`crate::state::normalize`] - the same
+/// key the cache itself is keyed by), unparseable lines, and anything that
+/// already has a fresh cached verdict, before ever spending a credit on it.
+/// Nothing is silently dropped - every exclusion is counted and reported.
+async fn dedupe_against_cache(store: &Store, lines: Vec<String>) -> (Vec<String>, DedupeReport) {
+    let mut seen = std::collections::HashSet::new();
+    let mut report = DedupeReport::default();
+    let mut to_submit = Vec::new();
+    for address in lines {
+        let Ok(key) = crate::state::normalize(&address) else {
+            report.invalid_lines += 1;
+            continue;
+        };
+        if !seen.insert(key) {
+            report.duplicate_lines += 1;
+            continue;
+        }
+        if matches!(store.cached_verdict(&address).await, Ok(Some(_))) {
+            report.already_cached += 1;
+            continue;
+        }
+        to_submit.push(address);
+    }
+    (to_submit, report)
+}
+
+async fn submit_verify_batch(store: &Store, file: &str) -> anyhow::Result<()> {
+    let lines: Vec<String> = std::fs::read_to_string(file)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    let read = lines.len();
+    let (to_submit, report) = dedupe_against_cache(store, lines).await;
+    if to_submit.is_empty() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "read": read, "report": report, "submitted": 0,
+                "note": "nothing left to submit after dropping duplicates/invalid/already-cached addresses",
+            })
+        );
+        return Ok(());
+    }
+    let id = emailable_client()?.submit_batch(&to_submit).await?;
+    println!(
+        "{}",
+        serde_json::json!({"read": read, "report": report, "submitted": to_submit.len(), "batch_id": id})
+    );
+    Ok(())
+}
+
+async fn print_batch_status(store: &Store, id: &str, cache_ttl_seconds: u64) -> anyhow::Result<()> {
+    match emailable_client()?.batch_status(id).await? {
+        BatchStatus::Processing { processed, total } => {
+            println!(
+                "{}",
+                serde_json::json!({"status": "processing", "processed": processed, "total": total})
+            );
+        }
+        BatchStatus::Complete { verdicts } => {
+            let ttl = Duration::from_secs(cache_ttl_seconds);
+            let (cached, results) = cache_batch_verdicts(store, &verdicts, ttl).await;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "complete", "total": verdicts.len(), "cached": cached,
+                    "verdicts": results,
+                })
+            );
+        }
+        BatchStatus::TooLargeForInlineResults { download_file, total } => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "too_large_for_inline_results", "total": total,
+                    "download_file": download_file,
+                    "note": "over 1000 addresses; this client does not fetch/parse the \
+                             ZIP/CSV download - results were not cached",
+                })
+            );
+        }
+    }
+    Ok(())
+}
 
 pub async fn run(command: &Command, store: &Store) -> anyhow::Result<bool> {
     match command {
@@ -71,6 +205,22 @@ pub async fn run(command: &Command, store: &Store) -> anyhow::Result<bool> {
             ensure!(valid_id(id), "invalid message ID");
             store.release_quarantine(id, reason).await?;
             println!("{}", serde_json::json!({"released": true, "hailer_message_id": id}));
+        }
+        Command::VerifyBatch(VerifyBatchArgs { file }) => {
+            submit_verify_batch(store, file).await?;
+        }
+        Command::BatchStatus(BatchStatusArgs { id, cache_ttl_seconds }) => {
+            print_batch_status(store, id, *cache_ttl_seconds).await?;
+        }
+        Command::EmailableAccount => {
+            let account = emailable_client()?.account().await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "owner_email": account.owner_email,
+                    "available_credits": account.available_credits,
+                })
+            );
         }
         _ => return Ok(false),
     }

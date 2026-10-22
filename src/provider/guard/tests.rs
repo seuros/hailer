@@ -19,12 +19,12 @@ impl MailProvider for FakeSender {
 
 fn request() -> SendRequest {
     SendRequest {
-        raw_mime: "From: Alice <alice@example.com>\r\nTo: user+alias@example.com\r\n\r\nHello"
+        raw_mime: "From: Alice <alice@example.dev>\r\nTo: user+alias@example.dev\r\n\r\nHello"
             .into(),
-        from_email_address: Some("bounce@example.com".into()),
+        from_email_address: Some("bounce@example.dev".into()),
         to_addresses: vec![ADDRESS.into()],
-        cc_addresses: vec!["allowed@example.com".into()],
-        bcc_addresses: vec!["USER+other@example.com".into()],
+        cc_addresses: vec!["allowed@example.dev".into()],
+        bcc_addresses: vec!["USER+other@example.dev".into()],
     }
 }
 
@@ -44,7 +44,7 @@ async fn only_suppressed_envelope_recipients_are_removed_and_mime_is_unchanged()
     let sent = sender.0.lock().expect("requests").clone();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].to_addresses, Vec::<String>::new());
-    assert_eq!(sent[0].cc_addresses, ["allowed@example.com"]);
+    assert_eq!(sent[0].cc_addresses, ["allowed@example.dev"]);
     assert_eq!(sent[0].bcc_addresses, Vec::<String>::new());
     assert_eq!(sent[0].raw_mime, original.raw_mime);
     assert_eq!(sent[0].from_email_address, original.from_email_address);

@@ -1,7 +1,7 @@
 {
-  "raw_mime": "From: Alice Example <alice@example.com>\r\nTo: to@example.com\r\nSubject: Hello\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nHello from Rails.\r\n",
-  "from_email_address": "bounce@example.com",
-  "to_addresses": ["override@example.com"],
-  "cc_addresses": ["cc@example.com"],
-  "bcc_addresses": ["bcc@example.com"]
+  "raw_mime": "From: Alice Example <alice@example.dev>\r\nTo: to@example.dev\r\nSubject: Hello\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nHello from Rails.\r\n",
+  "from_email_address": "bounce@example.dev",
+  "to_addresses": ["override@example.dev"],
+  "cc_addresses": ["cc@example.dev"],
+  "bcc_addresses": ["bcc@example.dev"]
 }

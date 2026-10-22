@@ -85,6 +85,12 @@ enum Command {
     UnbanDomain(UnbanDomainArgs),
     /// Let a quarantined message proceed; re-enters the normal dispatch queue immediately
     ReleaseQuarantine(CancelArgs),
+    /// Submit up to 1000 addresses (one per line) for async bulk verification, before a send
+    VerifyBatch(VerifyBatchArgs),
+    /// Poll a submitted batch; caches each verdict once complete so a later real send reuses it
+    BatchStatus(BatchStatusArgs),
+    /// Check the Emailable account's owner email and remaining verification credits
+    EmailableAccount,
 }
 
 #[derive(usage_rs::Args, Debug)]
@@ -139,6 +145,22 @@ struct ImportArgs {
     /// Path to the JSON export
     #[usage(long)]
     file: String,
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct VerifyBatchArgs {
+    /// Path to a file with one address per line (blank lines ignored)
+    #[usage(long)]
+    file: String,
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct BatchStatusArgs {
+    #[usage(long)]
+    id: String,
+    /// How long a cached verdict stays fresh once this batch completes
+    #[usage(long, default = "604800")]
+    cache_ttl_seconds: u64,
 }
 
 #[derive(usage_rs::Args, Debug)]

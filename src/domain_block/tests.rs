@@ -25,6 +25,30 @@ fn suffix_glob_matches_the_domain_and_its_subdomains() {
 }
 
 #[test]
+fn rfc_2606_reserved_domains_and_tlds_are_flagged() {
+    for domain in [
+        "example.com",
+        "example.net",
+        "example.org",
+        "foo.test",
+        "bar.example",
+        "baz.invalid",
+        "qux.localhost",
+        "localhost",
+        "sub.example.com",
+    ] {
+        assert!(is_reserved_example_domain(domain), "{domain} should be reserved");
+    }
+}
+
+#[test]
+fn a_domain_only_resembling_a_reserved_one_is_not_flagged() {
+    for domain in ["exampleindustries.com", "notexample.com", "example.co"] {
+        assert!(!is_reserved_example_domain(domain), "{domain} should not be reserved");
+    }
+}
+
+#[test]
 fn blocking_reason_reports_the_first_match_or_none() {
     let patterns = vec![
         ("*.kp".to_string(), Some("sanctioned TLD".to_string())),

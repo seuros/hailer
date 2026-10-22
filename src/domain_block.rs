@@ -39,3 +39,24 @@ pub fn blocking_reason<'a>(
         .find(|(pattern, _)| matches(pattern, domain))
         .map(|(_, reason)| reason.as_deref().unwrap_or("blocked"))
 }
+
+/// RFC 2606 reserves these for documentation/examples - `toto@example.com`
+/// is syntactically a real address but can never have a real mailbox. This
+/// is a boundary validation concern (an impossible address, same tier as a
+/// malformed one), not an operator policy choice - always on, not a row in
+/// `hailer.domain_blocks`, checked in [`crate::mail::SendRequest::validate`]
+/// before any guard in the chain runs.
+const RESERVED_EXAMPLE_PATTERNS: &[&str] = &[
+    "*.example.com",
+    "*.example.net",
+    "*.example.org",
+    "*.test",
+    "*.example",
+    "*.invalid",
+    "*.localhost",
+    "localhost",
+];
+
+pub fn is_reserved_example_domain(domain: &str) -> bool {
+    RESERVED_EXAMPLE_PATTERNS.iter().any(|pattern| matches(pattern, domain))
+}

@@ -8,6 +8,9 @@
 //! `Aws::Rails::Sesv2Mailer#deliver!` computes today, so the cutover changes
 //! nothing about delivery semantics.
 
+#[cfg(test)]
+mod tests;
+
 use serde::{Deserialize, Serialize};
 
 /// One `deliver!` call, as posted by `Hailer::DeliveryMethod`.
@@ -41,6 +44,15 @@ impl SendRequest {
         let mut count = 0;
         for address in self.recipients() {
             if !email_address::EmailAddress::is_valid(address) {
+                return Err(ProviderError::InvalidAddress(address.to_owned()));
+            }
+            // toto@example.com: syntactically a real address, but RFC 2606
+            // reserves example.com/.net/.org and the test/example/invalid/
+            // localhost TLDs for documentation - no real mailbox ever lives
+            // there. Same tier as a malformed address, not a policy choice.
+            if crate::domain_block::domain_of(address)
+                .is_some_and(crate::domain_block::is_reserved_example_domain)
+            {
                 return Err(ProviderError::InvalidAddress(address.to_owned()));
             }
             count += 1;

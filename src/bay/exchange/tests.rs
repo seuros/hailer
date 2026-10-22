@@ -69,10 +69,10 @@ async fn ruby_request_reaches_the_provider_without_rewriting_mail_or_envelopes()
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     assert_eq!(request.raw_mime, fixture["raw_mime"].as_str().expect("MIME"));
-    assert_eq!(request.from_email_address.as_deref(), Some("bounce@example.com"));
-    assert_eq!(request.to_addresses, ["override@example.com"]);
-    assert_eq!(request.cc_addresses, ["cc@example.com"]);
-    assert_eq!(request.bcc_addresses, ["bcc@example.com"]);
+    assert_eq!(request.from_email_address.as_deref(), Some("bounce@example.dev"));
+    assert_eq!(request.to_addresses, ["override@example.dev"]);
+    assert_eq!(request.cc_addresses, ["cc@example.dev"]);
+    assert_eq!(request.bcc_addresses, ["bcc@example.dev"]);
 }
 
 #[tokio::test]
@@ -131,7 +131,7 @@ async fn feedback_feed_is_paginated_without_acknowledging_or_erasing_events() {
     let page: Value = serde_json::from_slice(&body).expect("event page");
     assert_eq!(page["next_cursor"], 1);
     assert_eq!(page["events"][0]["event"]["kind"], "bounced");
-    assert_eq!(page["events"][0]["event"]["message_id"], "<rails-message@example.com>");
+    assert_eq!(page["events"][0]["event"]["message_id"], "<rails-message@example.dev>");
     let (status, body) = event_page(br#"{"after":1,"limit":1}"#, &store).await;
     assert_eq!(status, 200);
     let page: Value = serde_json::from_slice(&body).expect("event page");
@@ -170,7 +170,7 @@ async fn a_separate_empty_fin_is_consumed_before_the_next_request() {
 #[test]
 fn absent_optional_envelopes_deserialize_as_empty_not_null_recipients() {
     let request: SendRequest =
-        serde_json::from_str(r#"{"raw_mime":"From: alice@example.com\r\n\r\nHello"}"#)
+        serde_json::from_str(r#"{"raw_mime":"From: alice@example.dev\r\n\r\nHello"}"#)
             .expect("minimal request");
     assert!(request.from_email_address.is_none());
     assert_eq!(request.recipients().count(), 0);

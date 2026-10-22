@@ -72,6 +72,15 @@ pub enum VerifyError {
     Transport(String),
     #[error("verification response was not understood: {0}")]
     InvalidResponse(String),
+    /// A client-side precondition failed before any request was sent (e.g.
+    /// a batch over this client's inline-results limit) - distinct from a
+    /// malformed server response.
+    #[error("invalid verification request: {0}")]
+    InvalidRequest(String),
+    /// Checked before submitting a batch, not after - never wastes a
+    /// request (or remaining credits) on a batch that cannot complete.
+    #[error("insufficient verification credits: {available} available, {needed} needed")]
+    InsufficientCredits { available: u64, needed: usize },
 }
 
 /// Static dispatch, matching [`crate::provider::MailProvider`]'s own

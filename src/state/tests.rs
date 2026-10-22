@@ -13,7 +13,7 @@ async fn suppressions_events_and_deduplication_survive_pool_restart() {
     assert_eq!(store.events(0, 100).await.expect("events").events.len(), 1);
     assert_eq!(
         store
-            .blocked(&[ADDRESS.into(), "USER@example.com".into()])
+            .blocked(&[ADDRESS.into(), "USER@example.dev".into()])
             .await
             .expect("suppressed")
             .len(),
@@ -74,7 +74,7 @@ async fn import_is_atomic_and_preserves_commonshare_matching() {
     assert!(
         store
             .import(vec![
-                imported("USER+old@example.com", SuppressionReason::Bounce),
+                imported("USER+old@example.dev", SuppressionReason::Bounce),
                 imported("invalid", SuppressionReason::Complaint),
             ])
             .await
@@ -83,12 +83,12 @@ async fn import_is_atomic_and_preserves_commonshare_matching() {
     assert!(store.blocked(&[ADDRESS.into()]).await.expect("state").is_empty());
     assert_eq!(
         store
-            .import(vec![imported("USER+old@example.com", SuppressionReason::Bounce)])
+            .import(vec![imported("USER+old@example.dev", SuppressionReason::Bounce)])
             .await
             .expect("import"),
         1
     );
-    assert!(store.blocked(&[ADDRESS.into()]).await.expect("lookup").contains("user@example.com"));
+    assert!(store.blocked(&[ADDRESS.into()]).await.expect("lookup").contains("user@example.dev"));
     assert!(store.events(0, 100).await.expect("no artificial feedback").events.is_empty());
 }
 
@@ -129,7 +129,7 @@ async fn concurrent_redeliveries_commit_once_and_other_pools_see_the_result() {
             .blocked(&[ADDRESS.into()])
             .await
             .expect("shared suppression")
-            .contains("user@example.com")
+            .contains("user@example.dev")
     );
 }
 
@@ -162,7 +162,7 @@ async fn sequence_allocation_is_locked_until_commit_so_cursors_never_skip_events
 async fn database_error_rolls_back_counter_event_and_suppression() {
     let database = crate::test_support::database().await;
     let store = Store::connect(database.url(), 5).await.expect("state");
-    sqlx::query("ALTER TABLE hailer.suppressions ADD CONSTRAINT reject_fixture CHECK (email_address <> 'user@example.com')")
+    sqlx::query("ALTER TABLE hailer.suppressions ADD CONSTRAINT reject_fixture CHECK (email_address <> 'user@example.dev')")
         .execute(&store.pool).await.expect("inject database failure");
     assert!(store.record(&hard_bounce("retry")).await.is_err());
     assert!(store.events(0, 100).await.expect("rollback").events.is_empty());
@@ -176,6 +176,6 @@ async fn database_error_rolls_back_counter_event_and_suppression() {
 
 #[test]
 fn quoted_local_parts_are_not_mistaken_for_plus_aliases() {
-    assert_eq!(normalize(r#""a+b"@example.com"#).expect("quoted mailbox"), r#""a+b"@example.com"#);
-    assert_eq!(normalize(r#""a@b"@example.com"#).expect("quoted at"), r#""a@b"@example.com"#);
+    assert_eq!(normalize(r#""a+b"@example.dev"#).expect("quoted mailbox"), r#""a+b"@example.dev"#);
+    assert_eq!(normalize(r#""a@b"@example.dev"#).expect("quoted at"), r#""a@b"@example.dev"#);
 }
