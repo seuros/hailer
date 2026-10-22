@@ -14,7 +14,7 @@ module Hailer
   # Deliberately separate from the unchanged provider-feedback client/feed.
   class LifecycleClient
     ID = /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
-    STATES = %w[queued claimed dispatching retry_waiting held_unknown accepted rejected suppressed cancelled expired].freeze
+    STATES = %w[queued claimed dispatching retry_waiting held_unknown quarantined accepted rejected suppressed cancelled expired].freeze
     MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
     def initialize(**settings)
