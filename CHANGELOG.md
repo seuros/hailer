@@ -10,6 +10,9 @@
 - Native Rust future traits without `async-trait`; throttle-machines 0.3.1.
 - Current-source CommonShare queued smoke with loopback SES; no production cutover.
 - New Linux binary builds target Debian 13 Trixie (glibc 2.41), with locked GNU Ruby dependency variants.
+- Opt-in pre-send address verification (Emailable first; swappable via `Verifier` enum), `[email_verification]` in `hailer.toml`, cached verdicts in `hailer.address_verifications`. Fails open by default - a verifier outage or `unknown`/`risky` result never blocks a send unless explicitly configured into `reject_states`.
+- Domain/pattern blocklist (`hailer.domain_blocks`): exact domains or `*.`-suffix globs, always active. A small hand-curated disposable-provider list ships with the repo (source `curated`, only changes by upgrading); operators add their own via `hailer ban-domain`/`unban-domain` (source `operator`). Checked before suppression and verification - the cheapest, broadest filter runs first.
+- New `quarantined` message status, queued pipeline only: a non-ASCII recipient domain, or (opt-in `[domain_intel]`, RDAP-backed) a newly registered one, holds the whole message for operator review (`hailer release-quarantine`/`cancel-message`) instead of a hard reject. Excluded from the dispatch index like `held_unknown`; expires on the normal deadline like `queued`.
 
 ## 0.2.0 (unreleased)
 

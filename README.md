@@ -248,6 +248,59 @@ an interrupted send can have an unknown outcome.
 `/internal/` is a name, not an access control. Keep the bind private. The client
 does not follow redirects or use environment HTTP proxies.
 
+## Domain blocklist
+
+```text
+SendRequest -> domain blocklist (free, local) -> suppression (free, local) -> verification (paid, external) -> SES
+```
+
+Always active - an empty `hailer.domain_blocks` table is a no-op, there is
+no toggle. A pattern is an exact domain (`guerrillamail.com`) or a
+`*.`-prefixed suffix glob (`*.kp` matches that domain and any subdomain).
+A small hand-curated list of known disposable-mail providers ships with the
+repo (`source = 'curated'`, migration `05_domain_blocks.sql`); it only grows
+by upgrading Hailer, never fetched from a third party at runtime. Operators
+add their own:
+
+```sh
+hailer ban-domain --pattern "*.kp" --reason "sanctioned TLD"
+hailer unban-domain --pattern "*.kp"
+```
+
+`unban-domain` only removes an `operator`-sourced pattern - a curated one
+cannot be removed this way, by design.
+
+## Address verification
+
+```text
+SendRequest -> suppression check (cheap, local) -> address verification (paid, external) -> SES
+```
+
+Opt-in pre-send deliverability check, off by default. Enable with
+`[email_verification]` in `hailer.toml`:
+
+```toml
+[email_verification]
+provider = "emailable"
+reject_states = ["undeliverable"]  # risky/unknown fail open unless added here
+cache_ttl_seconds = 604800
+timeout_seconds = 5
+```
+
+Set `EMAILABLE_API_KEY` in the process environment, never in `hailer.toml` -
+the same rule as `HAILER_DATABASE_URL` and AWS credentials. Suppression
+filters first since it is a free local lookup; verification only runs for
+recipients that survive it, so a suppressed address never costs a paid
+lookup. Verdicts are cached in `hailer.address_verifications` (a week by
+default) - a retried send against the same address reuses the cached verdict
+instead of paying for another check.
+
+A verifier outage, timeout, or an `unknown`/`risky` result all fail open: this
+middleware is never a new reason a real send stops working unless a
+deployment explicitly adds those states to `reject_states`. Adding another
+provider (ZeroBounce, NeverBounce, ...) means a new `Verifier` enum variant in
+`src/verify.rs`; nothing else in the send path changes.
+
 ## Failure semantics
 
 An HTTP 200 means **SES accepted the message**, not that the recipient received

@@ -42,6 +42,11 @@ aws-sdk-sts = "1.119"
 redb = "4.3"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "migrate", "macros"] }
 
+# Optional address-verification middleware (Emailable today; the trait in
+# src/verify.rs keeps other providers swappable). rustls-tls reuses the TLS
+# stack aws-sdk already pulls in via hyper-rustls - no second stack.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # Recipient address validation at the boundary. `emval` was tried first (per
 # the dependency research) but turned out to be a Python-extension-first
 # crate (hard pyo3 + polars dependency, no way to opt out) that fails to

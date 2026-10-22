@@ -80,6 +80,70 @@ pub struct Config {
     pub rate_limit: Option<RateLimitConfig>,
     pub queued: Option<QueuedConfig>,
     pub ses_configuration_set: Option<String>,
+    pub email_verification: Option<EmailVerificationConfig>,
+    /// Only meaningful for the queued pipeline - a synchronous send has no
+    /// way to hold a message for operator review. See
+    /// `crate::domain_intel` for why quarantine, not a hard reject.
+    pub domain_intel: Option<DomainIntelConfig>,
+}
+
+/// Which domain-intelligence source backs [`crate::domain_intel::Intel`].
+/// RDAP is free and needs no credential, unlike [`VerifierKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntelKind {
+    Rdap,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainIntelConfig {
+    pub provider: IntelKind,
+    #[serde(default = "default_new_domain_threshold")]
+    pub new_domain_threshold_days: u32,
+}
+
+const fn default_new_domain_threshold() -> u32 {
+    30
+}
+
+/// Which third-party checker backs [`crate::verify::Verifier`]. Adding a
+/// provider means a new variant here plus an arm in `Verifier::verify` -
+/// nothing else in the send path changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifierKind {
+    Emailable,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailVerificationConfig {
+    pub provider: VerifierKind,
+    /// Which of Emailable's four states drop a recipient. Defaults to just
+    /// `undeliverable` - `risky`/`unknown` fail open unless a deployment
+    /// opts into stricter filtering.
+    #[serde(default = "default_reject_states")]
+    pub reject_states: Vec<crate::verify::State>,
+    #[serde(default = "default_verification_cache_ttl")]
+    pub cache_ttl_seconds: u64,
+    #[serde(default = "default_verification_timeout")]
+    pub timeout_seconds: u8,
+}
+
+fn default_reject_states() -> Vec<crate::verify::State> {
+    vec![crate::verify::State::Undeliverable]
+}
+
+/// A week. Deliverability verdicts do not change fast enough to justify
+/// re-paying for the same address on every retry of a held message.
+const fn default_verification_cache_ttl() -> u64 {
+    7 * 24 * 3600
+}
+
+/// Matches Emailable's own default `timeout` query parameter.
+const fn default_verification_timeout() -> u8 {
+    5
 }
 
 /// Explicit logical payload budgets. These are not PostgreSQL disk quotas.
@@ -144,6 +208,8 @@ impl Default for Config {
             rate_limit: None,
             queued: None,
             ses_configuration_set: None,
+            email_verification: None,
+            domain_intel: None,
         }
     }
 }
@@ -223,6 +289,25 @@ impl Config {
             "suppression_sync.interval_seconds",
             "must be in 60..86400",
         )?;
+        if let Some(verification) = &self.email_verification {
+            reject_if(
+                !(2..=10).contains(&verification.timeout_seconds),
+                "email_verification.timeout_seconds",
+                "must be in 2..10, matching Emailable's own accepted range",
+            )?;
+            reject_if(
+                !(60..=30 * 24 * 3600).contains(&verification.cache_ttl_seconds),
+                "email_verification.cache_ttl_seconds",
+                "must be in 60..2592000",
+            )?;
+        }
+        if let Some(intel) = &self.domain_intel {
+            reject_if(
+                !(1..=3650).contains(&intel.new_domain_threshold_days),
+                "domain_intel.new_domain_threshold_days",
+                "must be in 1..3650",
+            )?;
+        }
         if let Some(feedback) = &self.feedback {
             reject_if(
                 !feedback.queue_url.starts_with("https://"),

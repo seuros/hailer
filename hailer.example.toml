@@ -28,3 +28,22 @@ interval_seconds = 3600
 # Dedicated queue; subscribe the SNS topic with RawMessageDelivery=false.
 queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/hailer-feedback"
 topic_arn = "arn:aws:sns:us-east-1:123456789012:mail-feedback"
+
+# Opt in: pre-send deliverability check (Emailable today; the provider is a
+# swappable enum, not hardcoded). Set EMAILABLE_API_KEY separately - never
+# here. Verdicts are cached (hailer.address_verifications) so a retry of the
+# same address does not pay for a second lookup.
+# [email_verification]
+# provider = "emailable"
+# reject_states = ["undeliverable"]  # risky/unknown fail open by default
+# cache_ttl_seconds = 604800
+# timeout_seconds = 5
+
+# Opt in, queued pipeline only: hold a message for operator review
+# (hailer release-quarantine / cancel-message) instead of a hard reject.
+# A non-ASCII recipient domain is always checked regardless of this block;
+# this only adds the RDAP new-domain check. No credential needed - RDAP's
+# bootstrap registry is public.
+# [domain_intel]
+# provider = "rdap"
+# new_domain_threshold_days = 30

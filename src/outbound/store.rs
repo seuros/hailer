@@ -8,16 +8,46 @@ use super::{
     StoredLifecycleEvent, Submission,
 };
 use crate::config::QueuedConfig;
+use crate::domain_intel::{DomainFacts, DomainIntelligence, Intel, has_non_ascii_label, is_new};
 use crate::state::Store;
+
+/// Checked before opening a transaction: an external RDAP call must never
+/// happen while holding `outbound_counter`'s row lock. The whole message is
+/// quarantined (not just the flagged recipient) - this is an operator
+/// review gate on intent, not a per-recipient filter like suppression or
+/// the domain blocklist.
+async fn quarantine_reason(
+    mail: &crate::mail::SendRequest,
+    intel: &Intel,
+    new_domain_threshold_days: Option<u32>,
+) -> Option<String> {
+    let now = jiff::Timestamp::now();
+    for address in mail.recipients() {
+        let Some(domain) = crate::domain_block::domain_of(address) else { continue };
+        if has_non_ascii_label(domain) {
+            return Some(format!("non-ASCII domain: {domain}"));
+        }
+        if let Some(threshold) = new_domain_threshold_days {
+            let facts = intel.lookup(domain).await.unwrap_or(DomainFacts::UNKNOWN);
+            if is_new(facts, now, threshold) {
+                return Some(format!("newly registered domain: {domain}"));
+            }
+        }
+    }
+    None
+}
 
 impl Store {
     pub async fn submit(
         &self,
         command: Submission,
         budget: &QueuedConfig,
+        intel: &Intel,
+        new_domain_threshold_days: Option<u32>,
     ) -> Result<Receipt, IntakeError> {
         let prepared = Prepared::new(command)?;
-        self.submit_prepared(prepared, budget)
+        let quarantine = quarantine_reason(&prepared.mail, intel, new_domain_threshold_days).await;
+        self.submit_prepared(prepared, budget, quarantine)
             .await
             .map_err(|error| error.downcast::<IntakeError>().unwrap_or(IntakeError::Unavailable))
     }
@@ -26,6 +56,7 @@ impl Store {
         &self,
         command: Prepared,
         budget: &QueuedConfig,
+        quarantine_reason: Option<String>,
     ) -> anyhow::Result<Receipt> {
         let mut tx = self.outbound_write().await?;
         let previous = sqlx::query(
@@ -75,11 +106,16 @@ impl Store {
             "cc_addresses": command.mail.cc_addresses,
             "bcc_addresses": command.mail.bcc_addresses,
         });
+        let (status, lifecycle) = if quarantine_reason.is_some() {
+            ("quarantined", Lifecycle::quarantined()?)
+        } else {
+            ("queued", Lifecycle::queued())
+        };
         sqlx::query(
             "INSERT INTO hailer.messages \
              (id, submission_key, fingerprint, receipt, envelope, payload, payload_bytes, \
               status, lifecycle, accepted_at, expires_at, next_attempt_at, rfc_message_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $12, $8, \
               to_timestamp($9::double precision / 1000), \
               to_timestamp($10::double precision / 1000), \
               to_timestamp($9::double precision / 1000), $11)",
@@ -91,13 +127,18 @@ impl Store {
         .bind(Json(envelope))
         .bind(command.mail.raw_mime.as_bytes())
         .bind(command.bytes)
-        .bind(Json(Lifecycle::queued().persist()?))
+        .bind(Json(lifecycle.persist()?))
         .bind(now)
         .bind(deadline)
         .bind(super::original_message_id(&command.mail.raw_mime))
+        .bind(status)
         .execute(&mut *tx)
         .await?;
-        event(&mut tx, &id, "queued", serde_json::json!({})).await?;
+        if let Some(reason) = quarantine_reason {
+            event(&mut tx, &id, "quarantined", serde_json::json!({"reason": reason})).await?;
+        } else {
+            event(&mut tx, &id, "queued", serde_json::json!({})).await?;
+        }
         tx.commit().await?;
         Ok(receipt)
     }

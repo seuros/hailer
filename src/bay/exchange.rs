@@ -121,10 +121,15 @@ async fn queued_route(
         let Ok(command) = serde_json::from_slice::<crate::outbound::Submission>(body) else {
             return Some(error_reply(400, "invalid submission JSON"));
         };
-        return Some(match store.submit(command, budget).await {
-            Ok(receipt) => json_response(202, &receipt),
-            Err(error) => error_reply(error.status(), &error.to_string()),
-        });
+        return Some(
+            match store
+                .submit(command, budget, &runtime.intel, runtime.new_domain_threshold_days)
+                .await
+            {
+                Ok(receipt) => json_response(202, &receipt),
+                Err(error) => error_reply(error.status(), &error.to_string()),
+            },
+        );
     }
     if method == b"POST" && path == LIFECYCLE_PATH.as_bytes() {
         let query = match serde_json::from_slice::<EventQuery>(body) {

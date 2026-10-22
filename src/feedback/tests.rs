@@ -199,6 +199,8 @@ async fn shutdown_finishes_the_current_commit_and_ack_but_leaves_the_batch_tail(
         true,
         false,
         None,
+        Arc::new(crate::domain_intel::Intel::Disabled),
+        None,
     );
     let stop = CancellationToken::new();
     let task = tokio::spawn({

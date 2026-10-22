@@ -208,6 +208,8 @@ async fn queued_protocol_commits_before_acceptance_without_calling_the_provider(
             max_messages: 10,
             unknown_retention_seconds: 604_800,
         }),
+        Arc::new(crate::domain_intel::Intel::Disabled),
+        None,
     );
     let provider = FakeProvider::new(Outcome::Accepted);
     let stop = CancellationToken::new();
@@ -341,6 +343,8 @@ fn runtime(bootstrapped: bool) -> Arc<Runtime> {
         Arc::new(crate::control::Control::new(None, bootstrapped).expect("control")),
         false,
         !bootstrapped,
+        None,
+        Arc::new(crate::domain_intel::Intel::Disabled),
         None,
     )
 }

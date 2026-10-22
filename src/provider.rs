@@ -5,9 +5,11 @@
 //! (`provider/ses.rs`); a future SMTP/Postmark backend implements the same
 //! trait and is swapped in the same way — no change to `bay.rs` or `mail.rs`.
 
+pub mod domain_block_guard;
 pub mod guard;
 pub mod queued;
 pub mod ses;
+pub mod verify_guard;
 
 use std::future::Future;
 use thiserror::Error;

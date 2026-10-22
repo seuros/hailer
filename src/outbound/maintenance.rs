@@ -42,7 +42,7 @@ impl Store {
         }
         let ids: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM hailer.messages WHERE \
-             (status IN ('queued','retry_waiting','claimed') AND expires_at <= clock_timestamp()) \
+             (status IN ('queued','retry_waiting','claimed','quarantined') AND expires_at <= clock_timestamp()) \
              OR (provider_message_id IS NOT NULL AND status IN ('queued','retry_waiting','claimed','held_unknown')) \
              OR (status = 'held_unknown' AND payload IS NOT NULL AND \
                  accepted_at + $1 * interval '1 second' <= clock_timestamp()) \

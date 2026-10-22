@@ -17,6 +17,8 @@ mod aws_client;
 mod bay;
 mod config;
 mod control;
+mod domain_block;
+mod domain_intel;
 mod feedback;
 mod mail;
 mod operator_cli;
@@ -29,13 +31,21 @@ mod suppression_sync;
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
+mod verify;
 
 use std::sync::Arc;
 
 use provider::ses::SesProvider;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, DockingConfig};
+use crate::config::{
+    Config, ConfigError, DockingConfig, DomainIntelConfig, EmailVerificationConfig, IntelKind,
+    VerifierKind,
+};
+use crate::domain_intel::Intel;
+use crate::domain_intel::rdap::RdapClient;
+use crate::verify::Verifier;
+use crate::verify::emailable::EmailableClient;
 
 #[derive(usage_rs::Cli, Debug)]
 #[usage(name = "hailer")]
@@ -69,6 +79,12 @@ enum Command {
     CancelMessage(CancelArgs),
     /// Resolve an uncertain outcome; retry explicitly acknowledges duplicate risk
     ResolveMessage(ResolveArgs),
+    /// Add an operator domain/pattern block (exact domain or `*.`-suffix glob)
+    BanDomain(BanDomainArgs),
+    /// Remove an operator-added block; a curated (repo-shipped) one cannot be removed this way
+    UnbanDomain(UnbanDomainArgs),
+    /// Let a quarantined message proceed; re-enters the normal dispatch queue immediately
+    ReleaseQuarantine(CancelArgs),
 }
 
 #[derive(usage_rs::Args, Debug)]
@@ -101,6 +117,21 @@ struct ResolveArgs {
     provider_message_id: Option<String>,
     #[usage(long)]
     acknowledge_duplicate_risk: bool,
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct BanDomainArgs {
+    /// Exact domain ("guerrillamail.com") or `*.`-prefixed suffix glob ("*.kp")
+    #[usage(long)]
+    pattern: String,
+    #[usage(long)]
+    reason: Option<String>,
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct UnbanDomainArgs {
+    #[usage(long)]
+    pattern: String,
 }
 
 #[derive(usage_rs::Args, Debug)]
@@ -188,10 +219,34 @@ async fn main() -> anyhow::Result<()> {
         config.suppression_sync.is_none(),
     )?);
     let provider = Arc::new(SesProvider::new(&aws, config.ses_configuration_set.as_deref()));
-    supervisor::run(docking, config, aws, provider, store, control).await?;
+    let verifier = Arc::new(build_verifier(config.email_verification.as_ref())?);
+    let intel = Arc::new(build_intel(config.domain_intel.as_ref()));
+    supervisor::run(docking, config, aws, provider, store, control, verifier, intel).await?;
 
     info!("hailer stopped");
     Ok(())
+}
+
+/// `EMAILABLE_API_KEY` is read here, not from `hailer.toml` - matching how
+/// AWS credentials come from the standard chain rather than this file.
+fn build_verifier(config: Option<&EmailVerificationConfig>) -> anyhow::Result<Verifier> {
+    let Some(config) = config else { return Ok(Verifier::Disabled) };
+    match config.provider {
+        VerifierKind::Emailable => {
+            let api_key = std::env::var("EMAILABLE_API_KEY")
+                .map_err(|_| ConfigError::MissingEnv("EMAILABLE_API_KEY"))?;
+            Ok(Verifier::Emailable(EmailableClient::new(api_key, config.timeout_seconds)))
+        }
+    }
+}
+
+/// RDAP's bootstrap registry is public - unlike Emailable, no credential to
+/// read from the environment.
+fn build_intel(config: Option<&DomainIntelConfig>) -> Intel {
+    match config.map(|config| config.provider) {
+        Some(IntelKind::Rdap) => Intel::Rdap(RdapClient::new()),
+        None => Intel::Disabled,
+    }
 }
 
 /// Resolve on SIGTERM or ctrl-c.

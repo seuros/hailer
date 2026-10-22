@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn health_reflects_bootstrap_storage_failure_and_drain_without_leaking_data() {
     let control = Arc::new(Control::new(None, false).expect("control"));
-    let runtime = Runtime::new(control, true, true, None);
+    let runtime = Runtime::new(control, true, true, None, Arc::new(Intel::Disabled), None);
     assert_eq!(runtime.health(true, "closed").phase, "starting");
     runtime.sync_error();
     assert!(!runtime.health(true, "closed").ready);
@@ -42,6 +42,8 @@ fn dispatcher_readiness_requires_a_live_worker_without_changing_sync_readiness()
             max_messages: 10,
             unknown_retention_seconds: 604_800,
         }),
+        Arc::new(Intel::Disabled),
+        None,
     );
     assert!(runtime.health(true, "closed").ready);
     assert!(!runtime.dispatcher_ready(true, "closed"));

@@ -10,7 +10,7 @@ state_machine! {
     snapshot: true,
     initial: Queued,
     states: [
-        Queued, Claimed, Dispatching, RetryWaiting, HeldUnknown,
+        Queued, Claimed, Dispatching, RetryWaiting, HeldUnknown, Quarantined,
         Accepted, Rejected, Suppressed, Cancelled, Expired
     ],
     events {
@@ -22,9 +22,11 @@ state_machine! {
         accept { transition: { from: [Queued, Claimed, RetryWaiting, Dispatching, HeldUnknown], to: Accepted } }
         reject { transition: { from: [Claimed, Dispatching, HeldUnknown], to: Rejected } }
         suppress { transition: { from: Claimed, to: Suppressed } }
-        cancel { transition: { from: [Queued, RetryWaiting, Claimed], to: Cancelled } }
-        expire { transition: { from: [Queued, RetryWaiting, Claimed], to: Expired } }
+        cancel { transition: { from: [Queued, RetryWaiting, Claimed, Quarantined], to: Cancelled } }
+        expire { transition: { from: [Queued, RetryWaiting, Claimed, Quarantined], to: Expired } }
         authorize_retry { transition: { from: HeldUnknown, to: RetryWaiting } }
+        quarantine { transition: { from: Queued, to: Quarantined } }
+        release_quarantine { transition: { from: Quarantined, to: Queued } }
     }
 }
 
@@ -39,6 +41,15 @@ pub(super) struct Lifecycle(DynamicMessageLifecycle<()>);
 impl Lifecycle {
     pub fn queued() -> Self {
         Self(DynamicMessageLifecycle::new(()))
+    }
+
+    /// Every transition is a formal, audited event - a quarantined message
+    /// is still built by starting `Queued` and applying `Quarantine`, not
+    /// by adding a second initial state to the machine.
+    pub fn quarantined() -> anyhow::Result<Self> {
+        let mut lifecycle = Self::queued();
+        lifecycle.apply(MessageLifecycleEvent::Quarantine)?;
+        Ok(lifecycle)
     }
 
     pub fn restore(value: serde_json::Value, indexed_status: &str) -> anyhow::Result<Self> {
@@ -58,6 +69,7 @@ impl Lifecycle {
             MessageLifecycleState::Dispatching => "dispatching",
             MessageLifecycleState::RetryWaiting => "retry_waiting",
             MessageLifecycleState::HeldUnknown => "held_unknown",
+            MessageLifecycleState::Quarantined => "quarantined",
             MessageLifecycleState::Accepted => "accepted",
             MessageLifecycleState::Rejected => "rejected",
             MessageLifecycleState::Suppressed => "suppressed",

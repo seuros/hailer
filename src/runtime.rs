@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::config::QueuedConfig;
 use crate::control::{Control, Decision, Snapshot};
+use crate::domain_intel::Intel;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +52,11 @@ pub struct Health {
 pub struct Runtime {
     pub control: Arc<Control>,
     pub queued: Option<QueuedConfig>,
+    pub intel: Arc<Intel>,
+    /// `None` disables the RDAP new-domain check entirely; the non-ASCII
+    /// domain check is always on regardless (free, local, no reason to gate
+    /// it behind config).
+    pub new_domain_threshold_days: Option<u32>,
     active: AtomicUsize,
     observations: Mutex<Observations>,
 }
@@ -81,11 +87,15 @@ impl Runtime {
         feedback: bool,
         synchronization: bool,
         queued: Option<QueuedConfig>,
+        intel: Arc<Intel>,
+        new_domain_threshold_days: Option<u32>,
     ) -> Arc<Self> {
         let dispatcher = if queued.is_some() { Component::Starting } else { Component::Disabled };
         Arc::new(Self {
             control,
             queued,
+            intel,
+            new_domain_threshold_days,
             active: AtomicUsize::new(0),
             observations: Mutex::new(Observations {
                 dispatcher,

@@ -169,6 +169,96 @@ impl Store {
         .collect())
     }
 
+    /// A cached verdict still fresh as of now, if one exists. Address
+    /// verification costs money per lookup, so a cache hit skips the call
+    /// entirely rather than re-checking an address a retry already checked.
+    pub async fn cached_verdict(
+        &self,
+        address: &str,
+    ) -> anyhow::Result<Option<crate::verify::Verdict>> {
+        let Ok(key) = normalize(address) else { return Ok(None) };
+        let row = sqlx::query(
+            "SELECT state, reason, disposable, role FROM hailer.address_verifications \
+             WHERE email_address = $1 AND expires_at > clock_timestamp()",
+        )
+        .bind(&key)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let state: String = row.try_get("state")?;
+        Ok(Some(crate::verify::Verdict {
+            state: crate::verify::State::parse(&state),
+            reason: row.try_get("reason")?,
+            disposable: row.try_get("disposable")?,
+            role: row.try_get("role")?,
+        }))
+    }
+
+    /// Upsert: a later check always wins, even if an older one has not yet
+    /// expired (an operator may want a fresher verdict sooner).
+    pub async fn cache_verdict(
+        &self,
+        address: &str,
+        verdict: &crate::verify::Verdict,
+        ttl: Duration,
+    ) -> anyhow::Result<()> {
+        let key = normalize(address)?;
+        let ttl_seconds = i64::try_from(ttl.as_secs()).context("verification TTL overflow")?;
+        sqlx::query(
+            "INSERT INTO hailer.address_verifications \
+                (email_address, state, reason, disposable, role, checked_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, clock_timestamp(), clock_timestamp() + $6 * INTERVAL '1 second') \
+             ON CONFLICT (email_address) DO UPDATE SET \
+                state = EXCLUDED.state, reason = EXCLUDED.reason, disposable = EXCLUDED.disposable, \
+                role = EXCLUDED.role, checked_at = EXCLUDED.checked_at, expires_at = EXCLUDED.expires_at",
+        )
+        .bind(&key)
+        .bind(verdict.state.as_str())
+        .bind(&verdict.reason)
+        .bind(verdict.disposable)
+        .bind(verdict.role)
+        .bind(ttl_seconds)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The whole blocklist. Small by design (curated + operator-added), so
+    /// fetching it whole and matching in Rust (`domain_block::matches`) is
+    /// simpler and more testable than encoding glob matching as SQL.
+    pub async fn domain_block_patterns(&self) -> anyhow::Result<Vec<(String, Option<String>)>> {
+        Ok(sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT pattern, reason FROM hailer.domain_blocks",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn ban_domain(&self, pattern: &str, reason: Option<&str>) -> anyhow::Result<()> {
+        ensure!(!pattern.trim().is_empty(), "pattern must not be empty");
+        sqlx::query(
+            "INSERT INTO hailer.domain_blocks (pattern, source, reason) VALUES ($1, 'operator', $2) \
+             ON CONFLICT (pattern) DO UPDATE SET reason = EXCLUDED.reason",
+        )
+        .bind(pattern.trim())
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Only an `operator`-sourced pattern can be removed this way - the
+    /// curated list ships with the binary and only changes by upgrading it.
+    pub async fn unban_domain(&self, pattern: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM hailer.domain_blocks WHERE pattern = $1 AND source = 'operator'",
+        )
+        .bind(pattern.trim())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn events(&self, after: u64, limit: usize) -> anyhow::Result<EventPage> {
         ensure!((1..=100).contains(&limit), "event page limit must be 1..100");
         let after_sql = i64::try_from(after).context("cursor exceeds supported range")?;

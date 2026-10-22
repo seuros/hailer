@@ -29,12 +29,32 @@ impl Store {
         let mut tx = self.outbound_write().await?;
         let message = journal::load(&mut tx, id).await?;
         ensure!(
-            ["queued", "retry_waiting", "claimed"].contains(&message.status.as_str())
+            ["queued", "retry_waiting", "claimed", "quarantined"]
+                .contains(&message.status.as_str())
                 && message.provider_message_id.is_none(),
             "message can no longer be cancelled"
         );
         abandon_and_purge(&mut tx, &message, "operator_cancelled", M::Cancel).await?;
         event(&mut tx, id, "operator_cancelled", serde_json::json!({"reason": reason})).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Let a held message proceed - resets `next_attempt_at` to now so it
+    /// re-enters the normal dispatch queue immediately, the same way
+    /// `Resolution::Retry` below re-arms a held-unknown message.
+    pub async fn release_quarantine(&self, id: &str, reason: &str) -> anyhow::Result<()> {
+        validate_reason(reason)?;
+        let mut tx = self.outbound_write().await?;
+        let message = journal::load(&mut tx, id).await?;
+        ensure!(message.status == "quarantined", "message is not quarantined");
+        journal::transition(&mut tx, &message, M::ReleaseQuarantine).await?;
+        sqlx::query("UPDATE hailer.messages SET next_attempt_at = clock_timestamp() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        event(&mut tx, id, "operator_released_quarantine", serde_json::json!({"reason": reason}))
+            .await?;
         tx.commit().await?;
         Ok(())
     }

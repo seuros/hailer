@@ -9,6 +9,7 @@ use super::dispatch::Ticket;
 use super::tests::{budget, submission};
 use super::*;
 use crate::control::Control;
+use crate::domain_intel::Intel;
 use crate::feedback::FeedbackEvent;
 use crate::feedback::test_support::{TOPIC, notification, ses};
 use crate::provider::queued::{DispatchOutcome, QueuedProvider};
@@ -70,7 +71,8 @@ fn feedback(ticket: &Ticket, id: &str, kind: &str, address: &str) -> FeedbackEve
 async fn claims_are_exclusive_and_pre_dispatch_worker_loss_is_reclaimable() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("claim"), &budget()).await.expect("accept");
+    let receipt =
+        store.submit(submission("claim"), &budget(), &Intel::Disabled, None).await.expect("accept");
     let (one, two) = tokio::join!(store.claim_message(), store.claim_message());
     let one = one.expect("one");
     let two = two.expect("two");
@@ -88,7 +90,10 @@ async fn claims_are_exclusive_and_pre_dispatch_worker_loss_is_reclaimable() {
 async fn crossing_dispatch_boundary_changes_crash_recovery_to_held_unknown() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("unknown"), &budget()).await.expect("accept");
+    let receipt = store
+        .submit(submission("unknown"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     let dispatch = ticket(&store).await;
     assert!(store.dispatch_fence(&dispatch).await.expect("fence"));
     expire_lease(&store, &receipt.hailer_message_id).await;
@@ -115,7 +120,10 @@ async fn crossing_dispatch_boundary_changes_crash_recovery_to_held_unknown() {
 async fn durable_allowed_subset_matches_the_transport_and_original_body_is_unchanged() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("partial"), &budget()).await.expect("accept");
+    let receipt = store
+        .submit(submission("partial"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     block(&store, "to@example.com").await;
     let dispatch = ticket(&store).await;
     assert_eq!(dispatch.request.to_addresses, [] as [String; 0]);
@@ -136,7 +144,13 @@ async fn durable_allowed_subset_matches_the_transport_and_original_body_is_uncha
         .finish_dispatch(&dispatch.correlation, &DispatchOutcome::Accepted("ses-partial".into()))
         .await
         .expect("finish");
-    assert_eq!(store.submit(submission("partial"), &budget()).await.expect("replay"), receipt);
+    assert_eq!(
+        store
+            .submit(submission("partial"), &budget(), &Intel::Disabled, None)
+            .await
+            .expect("replay"),
+        receipt
+    );
     assert!(store.claim_message().await.expect("no resend").is_none());
     let count: i64 =
         sqlx::query_scalar("SELECT live_messages FROM hailer.outbound_counter WHERE id = 1")
@@ -150,7 +164,10 @@ async fn durable_allowed_subset_matches_the_transport_and_original_body_is_uncha
 async fn all_suppressed_and_expired_queued_work_purge_without_dispatch() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("blocked"), &budget()).await.expect("accept");
+    let receipt = store
+        .submit(submission("blocked"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     block(&store, "to@example.com").await;
     block(&store, "blind@example.com").await;
     let claim = store.claim_message().await.expect("claim").expect("work");
@@ -159,7 +176,10 @@ async fn all_suppressed_and_expired_queued_work_purge_without_dispatch() {
         store.message_status(&receipt.hailer_message_id).await.expect("status").expect("message");
     assert_eq!(status.status, "suppressed");
     assert!(!status.body_present);
-    let expired = store.submit(submission("expired"), &budget()).await.expect("accept");
+    let expired = store
+        .submit(submission("expired"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     sqlx::query(
         "UPDATE hailer.messages SET accepted_at = clock_timestamp() - interval '2 days', \
         expires_at = clock_timestamp() - interval '1 day' WHERE id = $1",
@@ -179,7 +199,8 @@ async fn all_suppressed_and_expired_queued_work_purge_without_dispatch() {
 async fn only_definite_failures_retry_and_manual_unknown_retry_keeps_history() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("retry"), &budget()).await.expect("accept");
+    let receipt =
+        store.submit(submission("retry"), &budget(), &Intel::Disabled, None).await.expect("accept");
     let first = ticket(&store).await;
     store
         .finish_dispatch(
@@ -265,11 +286,17 @@ async fn only_definite_failures_retry_and_manual_unknown_retry_keeps_history() {
 async fn cancellation_is_fenced_and_unknown_retention_never_labels_mail_unsent() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let cancelled = store.submit(submission("cancel"), &budget()).await.expect("accept");
+    let cancelled = store
+        .submit(submission("cancel"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     let claim = store.claim_message().await.expect("claim").expect("work");
     store.cancel_message(&cancelled.hailer_message_id, "business withdrawn").await.expect("cancel");
     assert!(store.prepare_dispatch(&claim, &control()).await.expect("fenced").is_none());
-    let held = store.submit(submission("retain"), &budget()).await.expect("accept");
+    let held = store
+        .submit(submission("retain"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     let dispatch = ticket(&store).await;
     assert!(store.cancel_message(&held.hailer_message_id, "too late").await.is_err());
     store.finish_dispatch(&dispatch.correlation, &DispatchOutcome::Unknown).await.expect("unknown");
@@ -298,7 +325,13 @@ async fn cancellation_is_fenced_and_unknown_retention_never_labels_mail_unsent()
             .await
             .is_err()
     );
-    assert_eq!(store.submit(submission("retain"), &budget()).await.expect("replay"), held);
+    assert_eq!(
+        store
+            .submit(submission("retain"), &budget(), &Intel::Disabled, None)
+            .await
+            .expect("replay"),
+        held
+    );
     store
         .resolve_message(&held.hailer_message_id, Resolution::NotAccepted, "confirmed not accepted")
         .await
@@ -315,7 +348,10 @@ async fn cancellation_is_fenced_and_unknown_retention_never_labels_mail_unsent()
 async fn trusted_unique_feedback_resolves_unknown_and_later_bounces_do_not_reopen_it() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("feedback"), &budget()).await.expect("accept");
+    let receipt = store
+        .submit(submission("feedback"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     let dispatch = ticket(&store).await;
     store.finish_dispatch(&dispatch.correlation, &DispatchOutcome::Unknown).await.expect("unknown");
     let mut unrelated = feedback(&dispatch, "ses-related", "Delivery", "to@example.com");
@@ -355,7 +391,10 @@ async fn trusted_unique_feedback_resolves_unknown_and_later_bounces_do_not_reope
 async fn result_commit_failure_recovers_unknown_not_retryable() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("commit-loss"), &budget()).await.expect("accept");
+    let receipt = store
+        .submit(submission("commit-loss"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     let dispatch = ticket(&store).await;
     sqlx::raw_sql("CREATE FUNCTION hailer.fail_result() RETURNS trigger LANGUAGE plpgsql AS $$ \
         BEGIN IF NEW.kind = 'provider_accepted' THEN RAISE EXCEPTION 'injected'; END IF; RETURN NEW; END $$; \
@@ -392,10 +431,12 @@ async fn result_commit_failure_recovers_unknown_not_retryable() {
 async fn invalid_feedback_correlation_cannot_resolve_another_attempt() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let first = store.submit(submission("one"), &budget()).await.expect("accept");
+    let first =
+        store.submit(submission("one"), &budget(), &Intel::Disabled, None).await.expect("accept");
     let one = ticket(&store).await;
     store.finish_dispatch(&one.correlation, &DispatchOutcome::Unknown).await.expect("unknown");
-    let second = store.submit(submission("two"), &budget()).await.expect("accept");
+    let second =
+        store.submit(submission("two"), &budget(), &Intel::Disabled, None).await.expect("accept");
     let two = ticket(&store).await;
     store.finish_dispatch(&two.correlation, &DispatchOutcome::Unknown).await.expect("unknown");
     let wrong_address =
@@ -432,7 +473,10 @@ async fn invalid_feedback_correlation_cannot_resolve_another_attempt() {
 async fn correlated_feedback_failure_rolls_back_feedback_suppression_and_spool_together() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("atomic-feedback"), &budget()).await.expect("accept");
+    let receipt = store
+        .submit(submission("atomic-feedback"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     let dispatch = ticket(&store).await;
     store.finish_dispatch(&dispatch.correlation, &DispatchOutcome::Unknown).await.expect("unknown");
     sqlx::raw_sql("CREATE FUNCTION hailer.fail_correlated() RETURNS trigger LANGUAGE plpgsql AS $$ \
@@ -468,7 +512,10 @@ async fn correlated_feedback_failure_rolls_back_feedback_suppression_and_spool_t
 async fn status_observation_windows_are_bounded_and_explicitly_truncated() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("observations"), &budget()).await.expect("accept");
+    let receipt = store
+        .submit(submission("observations"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     let dispatch = ticket(&store).await;
     store
         .finish_dispatch(&dispatch.correlation, &DispatchOutcome::Accepted("ses-opens".into()))
@@ -495,7 +542,10 @@ async fn status_observation_windows_are_bounded_and_explicitly_truncated() {
 async fn local_policy_denials_are_safe_and_operator_acceptance_is_audited() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("policy"), &budget()).await.expect("accept");
+    let receipt = store
+        .submit(submission("policy"), &budget(), &Intel::Disabled, None)
+        .await
+        .expect("accept");
     let claim = store.claim_message().await.expect("claim").expect("work");
     assert!(
         store
@@ -577,11 +627,20 @@ impl QueuedProvider for Probe {
 async fn supervised_worker_drains_one_effect_but_leaves_the_queue_tail_durable() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("probe"), &budget()).await.expect("accept");
-    let tail = store.submit(submission("tail"), &budget()).await.expect("accept");
+    let receipt =
+        store.submit(submission("probe"), &budget(), &Intel::Disabled, None).await.expect("accept");
+    let tail =
+        store.submit(submission("tail"), &budget(), &Intel::Disabled, None).await.expect("accept");
     sqlx::query("UPDATE hailer.messages SET next_attempt_at = clock_timestamp() + interval '1 hour' WHERE id = $1")
         .bind(&tail.hailer_message_id).execute(&store.pool).await.expect("defer tail");
-    let runtime = Runtime::new(Arc::new(control()), false, false, Some(budget()));
+    let runtime = Runtime::new(
+        Arc::new(control()),
+        false,
+        false,
+        Some(budget()),
+        Arc::new(Intel::Disabled),
+        None,
+    );
     let stop = CancellationToken::new();
     let provider = Arc::new(Probe {
         store: store.clone(),
@@ -622,8 +681,16 @@ async fn supervised_worker_drains_one_effect_but_leaves_the_queue_tail_durable()
 async fn forced_worker_loss_and_restart_never_repeat_an_uncertain_effect() {
     let db = crate::test_support::database().await;
     let store = Store::connect(db.url(), 5).await.expect("store");
-    let receipt = store.submit(submission("probe"), &budget()).await.expect("accept");
-    let runtime = Runtime::new(Arc::new(control()), false, false, Some(budget()));
+    let receipt =
+        store.submit(submission("probe"), &budget(), &Intel::Disabled, None).await.expect("accept");
+    let runtime = Runtime::new(
+        Arc::new(control()),
+        false,
+        false,
+        Some(budget()),
+        Arc::new(Intel::Disabled),
+        None,
+    );
     let provider = Arc::new(Probe {
         store: store.clone(),
         calls: AtomicUsize::new(0),

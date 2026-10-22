@@ -161,6 +161,39 @@ duplicate-risk acknowledgement. A new attempt never erases the old uncertainty.
 All decisions require an audit reason. After expiry or body purge, sending
 requires a new intent/key.
 
+## Quarantine
+
+Opt-in, queued pipeline only - a synchronous `:hailer` send has no way to
+hold a message for later review, so a non-ASCII domain or a newly
+registered one makes the synchronous adapter reject outright. The queued
+adapter holds instead:
+
+```toml
+[domain_intel]
+provider = "rdap"
+new_domain_threshold_days = 30
+```
+
+A recipient domain that is not plain ASCII (a malformed/unencoded IDN, or a
+homograph-spoofing attempt - legitimate IDNs are transmitted as ASCII
+punycode) is always checked, regardless of this block. `[domain_intel]`
+additionally checks the domain's RDAP registration date; newer than the
+threshold holds the message as `quarantined` instead of admitting it as
+`queued`. The whole message is quarantined, not just the flagged recipient -
+this is an operator review gate on intent, not a per-recipient filter like
+suppression or the domain blocklist (`hailer ban-domain`). RDAP's bootstrap
+registry is public; no credential is needed.
+
+```sh
+hailer release-quarantine --id MESSAGE_UUID --reason "reviewed, legitimate"
+hailer cancel-message --id MESSAGE_UUID --reason "rejected on review"
+```
+
+Releasing resets `next_attempt_at` to now, so the message re-enters the
+normal dispatch queue immediately. `cancel-message` also accepts a
+quarantined message. An unactioned quarantine still expires on the same
+deadline as a normal `queued` message.
+
 ## Local application verification
 
 `test/commonshare_smoke.rb` runs inside CommonShare's test environment with a

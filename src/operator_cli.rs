@@ -2,7 +2,7 @@ use anyhow::ensure;
 
 use crate::outbound::{Resolution, valid_id};
 use crate::state::Store;
-use crate::{CancelArgs, Command, MessageIdArgs};
+use crate::{BanDomainArgs, CancelArgs, Command, MessageIdArgs, UnbanDomainArgs};
 
 pub async fn run(command: &Command, store: &Store) -> anyhow::Result<bool> {
     match command {
@@ -57,6 +57,20 @@ pub async fn run(command: &Command, store: &Store) -> anyhow::Result<bool> {
                 store.resolve_message(&options.id, resolution, &options.reason).await?;
             }
             println!("{}", serde_json::json!({"resolved": true, "hailer_message_id": options.id}));
+        }
+        Command::BanDomain(BanDomainArgs { pattern, reason }) => {
+            ensure!(!pattern.trim().is_empty(), "pattern must not be empty");
+            store.ban_domain(pattern, reason.as_deref()).await?;
+            println!("{}", serde_json::json!({"banned": true, "pattern": pattern}));
+        }
+        Command::UnbanDomain(UnbanDomainArgs { pattern }) => {
+            let removed = store.unban_domain(pattern).await?;
+            println!("{}", serde_json::json!({"removed": removed, "pattern": pattern}));
+        }
+        Command::ReleaseQuarantine(CancelArgs { id, reason }) => {
+            ensure!(valid_id(id), "invalid message ID");
+            store.release_quarantine(id, reason).await?;
+            println!("{}", serde_json::json!({"released": true, "hailer_message_id": id}));
         }
         _ => return Ok(false),
     }
