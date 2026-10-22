@@ -1,5 +1,16 @@
 # Changelog
 
+## Working tree — durable delivery (unreleased)
+
+- Opt-in `:hailer_queued` Rails adapter with stable job keys and frozen intake retries.
+- PostgreSQL ownership receipts, immutable submission replay/conflict and explicit spool budgets.
+- Supervised fenced dispatch, journaled attempts, safe retries and held unknown outcomes.
+- Tagged SES feedback correlation, recipient facts, audited cancellation and resolution.
+- Deadline/body retention, independent lifecycle feed and intake/dispatcher readiness.
+- Native Rust future traits without `async-trait`; throttle-machines 0.3.1.
+- Current-source CommonShare queued smoke with loopback SES; no production cutover.
+- New Linux binary builds target Debian 13 Trixie (glibc 2.41), with locked GNU Ruby dependency variants.
+
 ## 0.2.0 (unreleased)
 
 - PostgreSQL-only live state, with atomic feedback and commit-safe cursors.

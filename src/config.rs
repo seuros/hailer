@@ -78,6 +78,22 @@ pub struct Config {
     pub feedback: Option<FeedbackConfig>,
     pub suppression_sync: Option<SuppressionSyncConfig>,
     pub rate_limit: Option<RateLimitConfig>,
+    pub queued: Option<QueuedConfig>,
+    pub ses_configuration_set: Option<String>,
+}
+
+/// Explicit logical payload budgets. These are not PostgreSQL disk quotas.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueuedConfig {
+    pub max_bytes: i64,
+    pub max_messages: i64,
+    #[serde(default = "default_unknown_retention")]
+    pub unknown_retention_seconds: u64,
+}
+
+const fn default_unknown_retention() -> u64 {
+    7 * 24 * 3600
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,8 +142,22 @@ impl Default for Config {
             feedback: None,
             suppression_sync: None,
             rate_limit: None,
+            queued: None,
+            ses_configuration_set: None,
         }
     }
+}
+
+/// Shared shape of every `Config::validate` field check: reject with
+/// `ConfigError::InvalidConfig(name, message)` when `invalid` holds,
+/// otherwise pass through. Each call site supplies its own, unrelated
+/// condition; only the "reject or continue" plumbing is common.
+const fn reject_if(
+    invalid: bool,
+    name: &'static str,
+    message: &'static str,
+) -> Result<(), ConfigError> {
+    if invalid { Err(ConfigError::InvalidConfig(name, message)) } else { Ok(()) }
 }
 
 impl Config {
@@ -143,57 +173,74 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        reject_if(
+            self.ses_configuration_set.as_ref().is_some_and(|name| {
+                name.is_empty()
+                    || name.len() > 64
+                    || !name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            }),
+            "ses_configuration_set",
+            "expected 1..64 ASCII letters, digits, underscores or hyphens",
+        )?;
+        reject_if(
+            self.queued.as_ref().is_some_and(|queue| {
+                queue.max_bytes <= 0
+                    || queue.max_messages <= 0
+                    || !(1..=604_800).contains(&queue.unknown_retention_seconds)
+            }),
+            "queued",
+            "positive byte/message budgets and unknown retention in 1..604800 required",
+        )?;
         if self.threads == 0 {
             return Err(ConfigError::InvalidEnv("threads", "must be at least 1"));
         }
-        if !(1..=300).contains(&self.shutdown_timeout_seconds) {
-            return Err(ConfigError::InvalidConfig(
-                "shutdown_timeout_seconds",
-                "must be in 1..300",
-            ));
-        }
-        if !(1..=64).contains(&self.database_pool_size) {
-            return Err(ConfigError::InvalidConfig("database_pool_size", "must be in 1..64"));
-        }
-        if self.rate_limit.as_ref().is_some_and(|rate| {
-            !rate.recipients_per_second.is_finite()
-                || rate.recipients_per_second <= 0.0
-                || rate.recipients_per_second > 1_000_000.0
-                || !(1..=100_000).contains(&rate.burst)
-        }) {
-            return Err(ConfigError::InvalidConfig("rate_limit", "invalid rate or burst"));
-        }
-        if self
-            .suppression_sync
-            .as_ref()
-            .is_some_and(|config| !(60..=86_400).contains(&config.interval_seconds))
-        {
-            return Err(ConfigError::InvalidConfig(
-                "suppression_sync.interval_seconds",
-                "must be in 60..86400",
-            ));
-        }
+        reject_if(
+            !(1..=300).contains(&self.shutdown_timeout_seconds),
+            "shutdown_timeout_seconds",
+            "must be in 1..300",
+        )?;
+        reject_if(
+            !(1..=64).contains(&self.database_pool_size),
+            "database_pool_size",
+            "must be in 1..64",
+        )?;
+        reject_if(
+            self.rate_limit.as_ref().is_some_and(|rate| {
+                !rate.recipients_per_second.is_finite()
+                    || rate.recipients_per_second <= 0.0
+                    || rate.recipients_per_second > 1_000_000.0
+                    || !(1..=100_000).contains(&rate.burst)
+            }),
+            "rate_limit",
+            "invalid rate or burst",
+        )?;
+        reject_if(
+            self.suppression_sync
+                .as_ref()
+                .is_some_and(|config| !(60..=86_400).contains(&config.interval_seconds)),
+            "suppression_sync.interval_seconds",
+            "must be in 60..86400",
+        )?;
         if let Some(feedback) = &self.feedback {
-            if !feedback.queue_url.starts_with("https://") {
-                return Err(ConfigError::InvalidConfig(
-                    "feedback.queue_url",
-                    "expected HTTPS SQS URL",
-                ));
-            }
+            reject_if(
+                !feedback.queue_url.starts_with("https://"),
+                "feedback.queue_url",
+                "expected HTTPS SQS URL",
+            )?;
             let parts: Vec<_> = feedback.topic_arn.split(':').collect();
-            if parts.len() != 6
-                || parts[0] != "arn"
-                || parts[2] != "sns"
-                || parts[3].is_empty()
-                || parts[4].len() != 12
-                || !parts[4].bytes().all(|byte| byte.is_ascii_digit())
-                || parts[5].is_empty()
-            {
-                return Err(ConfigError::InvalidConfig(
-                    "feedback.topic_arn",
-                    "expected SNS topic ARN",
-                ));
-            }
+            reject_if(
+                parts.len() != 6
+                    || parts[0] != "arn"
+                    || parts[2] != "sns"
+                    || parts[3].is_empty()
+                    || parts[4].len() != 12
+                    || !parts[4].bytes().all(|byte| byte.is_ascii_digit())
+                    || parts[5].is_empty(),
+                "feedback.topic_arn",
+                "expected SNS topic ARN",
+            )?;
         }
         Ok(())
     }

@@ -1,7 +1,7 @@
+use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Context;
-use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -15,10 +15,11 @@ pub struct QueuedMessage {
     pub body: String,
 }
 
-#[async_trait]
+/// Statically dispatched queue operations. The future itself must be sendable
+/// because the supervisor moves the consumer into a Tokio task.
 pub trait FeedbackQueue: Send + Sync {
-    async fn receive(&self) -> anyhow::Result<Vec<QueuedMessage>>;
-    async fn delete(&self, receipt: &str) -> anyhow::Result<()>;
+    fn receive(&self) -> impl Future<Output = anyhow::Result<Vec<QueuedMessage>>> + Send;
+    fn delete(&self, receipt: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
 pub struct AwsQueue {
@@ -32,7 +33,6 @@ impl AwsQueue {
     }
 }
 
-#[async_trait]
 impl FeedbackQueue for AwsQueue {
     async fn receive(&self) -> anyhow::Result<Vec<QueuedMessage>> {
         let output = self
@@ -67,7 +67,7 @@ impl FeedbackQueue for AwsQueue {
 
 /// Return only after the state commit and the SQS acknowledgement both succeed.
 pub async fn process(
-    queue: &dyn FeedbackQueue,
+    queue: &impl FeedbackQueue,
     store: &Store,
     topic: &str,
     message: QueuedMessage,
@@ -81,7 +81,7 @@ pub async fn process(
 }
 
 pub async fn run(
-    queue: &dyn FeedbackQueue,
+    queue: &impl FeedbackQueue,
     store: Store,
     config: &FeedbackConfig,
     runtime: &Runtime,

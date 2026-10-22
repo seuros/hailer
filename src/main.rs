@@ -13,11 +13,14 @@
 //! operations within a bounded deadline. Sends interrupted at that deadline
 //! can still have ambiguous outcomes and must not be blindly retried.
 
+mod aws_client;
 mod bay;
 mod config;
 mod control;
 mod feedback;
 mod mail;
+mod operator_cli;
+mod outbound;
 mod provider;
 mod runtime;
 mod state;
@@ -29,8 +32,6 @@ mod test_support;
 
 use std::sync::Arc;
 
-use provider::MailProvider;
-use provider::guard::SuppressionGuard;
 use provider::ses::SesProvider;
 use tracing::{error, info, warn};
 
@@ -62,6 +63,44 @@ enum Command {
     ImportSuppressions(ImportArgs),
     /// Merge the current AWS account/region suppression list into PostgreSQL
     SyncSuppressions(SyncArgs),
+    /// Inspect durable message status and attempt/recipient facts without AWS
+    MessageStatus(MessageIdArgs),
+    /// Prevent future sends of a message that has not entered dispatch
+    CancelMessage(CancelArgs),
+    /// Resolve an uncertain outcome; retry explicitly acknowledges duplicate risk
+    ResolveMessage(ResolveArgs),
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct MessageIdArgs {
+    #[usage(long)]
+    id: String,
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct CancelArgs {
+    #[usage(long)]
+    id: String,
+    #[usage(long)]
+    reason: String,
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct ResolveArgs {
+    #[usage(long)]
+    id: String,
+    /// Select a historical unknown attempt instead of the current held message
+    #[usage(long)]
+    attempt_id: Option<String>,
+    #[usage(long)]
+    reason: String,
+    /// accepted, not-accepted, or retry
+    #[usage(long)]
+    outcome: String,
+    #[usage(long)]
+    provider_message_id: Option<String>,
+    #[usage(long)]
+    acknowledge_duplicate_risk: bool,
 }
 
 #[derive(usage_rs::Args, Debug)]
@@ -99,6 +138,11 @@ async fn main() -> anyhow::Result<()> {
     let database_url = std::env::var("HAILER_DATABASE_URL")
         .map_err(|_| anyhow::anyhow!("set HAILER_DATABASE_URL to Hailer's PostgreSQL database"))?;
     let store = state::Store::connect(&database_url, config.database_pool_size).await?;
+    if let Some(command) = &args.command
+        && operator_cli::run(command, &store).await?
+    {
+        return Ok(());
+    }
     if matches!(args.command, Some(Command::Migrate)) {
         println!("{}", serde_json::json!({"migrated": true}));
         return Ok(());
@@ -143,11 +187,7 @@ async fn main() -> anyhow::Result<()> {
         config.rate_limit.as_ref(),
         config.suppression_sync.is_none(),
     )?);
-    let provider: Arc<dyn MailProvider> = Arc::new(SuppressionGuard {
-        inner: Arc::new(SesProvider::new(&aws)),
-        store: store.clone(),
-        control: control.clone(),
-    });
+    let provider = Arc::new(SesProvider::new(&aws, config.ses_configuration_set.as_deref()));
     supervisor::run(docking, config, aws, provider, store, control).await?;
 
     info!("hailer stopped");

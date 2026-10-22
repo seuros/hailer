@@ -13,6 +13,12 @@ This repository prepares two things at version **0.2.0** (not published yet):
 ActionMailer → hailer gem → private Mothership route → hailer binary → SES
 ```
 
+The working tree also implements an **opt-in durable queued adapter**. See
+[durable delivery](docs/durable-delivery.md) for ownership, recovery, routing
+and operator controls. It is not included in the preserved 0.2 release
+candidates. Current-source macOS, ARM64 Linux and x86_64 Linux verification
+gates pass locally; this work has not been published or deployed.
+
 ## Rails
 
 Requires Ruby 4.0+ and Rails 8.1 or newer within Rails 8.x.
@@ -259,9 +265,9 @@ it. A successful response must include a nonblank `message_id`.
 | Connection, TLS, or timeout failure | `Hailer::TransportError` |
 | Missing/invalid endpoint or timeout settings | `Hailer::ConfigurationError` |
 
-The gem does not retry. A lost response can happen **after** SES accepted the
-message; retrying may duplicate it. There is no durable **outbound** queue or
-send-idempotency store yet; feedback deduplication does not deduplicate sends.
+The synchronous adapter does not retry. A lost response can happen **after** SES
+accepted the message; retrying may duplicate it. This route does not use the
+opt-in outbound spool or its submission-key deduplication.
 Rails jobs can also retry, so configure them deliberately.
 The SES SDK makes **one send attempt**. AWS throttling/transient failures return
 503, permanent service rejections 502, and disconnects/timeouts/missing message
@@ -305,8 +311,12 @@ test database, Mothership, the optimized binary from the macOS gem, its installe
 client, and a loopback SES fixture. Its existing AWS
 receivers remain until the real subscription and suppression cutover is verified.
 No deployed AWS routing has been changed.
-Validation/behavior plugins, a durable outbound queue, distributed account-wide
-quotas, and send idempotency remain later work. No plugin API is promised yet.
+The current-source queued adapter and dispatcher also pass a CommonShare smoke
+using an isolated Bundler Gemfile, real Mothership and loopback SES. No app
+Gemfile or production configuration was changed. Its legacy history observer
+still needs queued-ownership semantics before opt-in deployment.
+Validation/behavior plugins and distributed account-wide quotas remain later
+work. No plugin API or provider exactly-once delivery is promised.
 
 ## Development
 
@@ -354,8 +364,17 @@ in the packaging task publishes a gem.
 ## Linux releases and RubyGems
 
 The **Linux binary gems** GitHub Actions workflow builds `x86_64-linux-gnu`
-and `aarch64-linux-gnu` natively against Debian 12 (glibc 2.36). These artifacts
-require glibc 2.36 or newer; they are not Alpine/musl builds.
+and `aarch64-linux-gnu` natively against Debian 13 Trixie (glibc 2.41).
+New Trixie-built artifacts target glibc 2.41 or newer, not Bookworm or
+Alpine/musl. The preserved older 0.2 candidates retain their original baseline.
+Local OrbStack verification uses `test/linux/Dockerfile` for each architecture
+and a separate `ruby:4.0-slim-trixie` runtime.
+Use a copied checkout in separate per-architecture Docker work volumes; do not
+reuse the macOS `target/` or Ruby bundle. Run the locked Ruby tests, release Rust
+tests and `native:package` with an isolated PostgreSQL fixture, then install each
+gem in its slim runtime and exercise the launcher, migrations and import CLI.
+When transferring a macOS snapshot, use `COPYFILE_DISABLE=1 tar --no-xattrs`
+so AppleDouble `._*` metadata cannot appear as spurious SQL migrations.
 
 ```sh
 gh workflow run linux-gems.yml --repo seuros/hailer -f tag=v0.2.0

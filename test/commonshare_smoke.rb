@@ -5,17 +5,30 @@
 # HAILER_DATABASE_URL=postgres://.../disposable_hailer_database \
 # bundle exec rails runner /path/to/hailer/test/commonshare_smoke.rb
 # Uses the application's installed client, a real bay, and loopback SES only.
+# Set HAILER_SMOKE_QUEUED=1 and use an isolated Bundler Gemfile pointing to this
+# working tree to verify durable dispatch. The application's Gemfile is untouched.
 require 'socket'
 require 'tmpdir'
 require 'timeout'
 require 'fileutils'
 require 'base64'
 require 'net/http'
+require 'uri'
 
 abort 'test environment required' unless Rails.env.test?
 abort 'CommonShare test database required' unless ActiveRecord::Base.connection_db_config.database == 'commonshare_test'
 binary = File.realpath(ENV.fetch('HAILER_SMOKE_BINARY'))
-abort 'isolated Hailer database URL required' if ENV.fetch('HAILER_DATABASE_URL').empty?
+database_uri = URI.parse(ENV.fetch('HAILER_DATABASE_URL'))
+unless %w[postgres postgresql].include?(database_uri.scheme) &&
+       %w[127.0.0.1 localhost [::1]].include?(database_uri.host) &&
+       %r{\A/hailer_[a-z0-9_]*(?:test|smoke|commonshare)[a-z0-9_]*\z}.match?(database_uri.path)
+  abort 'a loopback disposable Hailer test/smoke database is required'
+end
+queued = ENV['HAILER_SMOKE_QUEUED'] == '1'
+abort 'queued smoke needs the current client' if queued && !defined?(Hailer::QueuedClient)
+if (expected_platform = ENV['HAILER_SMOKE_EXPECTED_PLATFORM'])
+  abort 'unexpected installed Hailer gem platform' unless Gem.loaded_specs.fetch('hailer').platform.to_s == expected_platform
+end
 
 class HailerControlProbeMailer < ActionMailer::Base
   def probe
@@ -37,20 +50,32 @@ ensure
   socket&.close
 end
 
-directory = Dir.mktmpdir('hailer-ctl-', '/tmp')
+def smoke_ready?(port, path)
+  response = Net::HTTP.new('127.0.0.1', port, nil).get(path)
+  response.code == '200' && JSON.parse(response.body).fetch('ready')
+end
+
+directory =Dir.mktmpdir('hailer-ctl-', '/tmp')
 listener = TCPServer.new('127.0.0.1', 0)
 requests = Queue.new
+release_provider = Queue.new
 fixture = Thread.new do
-  socket = listener.accept
-  line = socket.gets("\r\n")
-  headers = {}
-  while (header = socket.gets("\r\n")) != "\r\n"
-    key, value = header.split(':', 2)
-    headers[key.downcase] = value.strip
+  socket = nil
+  loop do
+    socket = listener.accept
+    line = socket.gets("\r\n")
+    headers = {}
+    while (header = socket.gets("\r\n")) != "\r\n"
+      key, value = header.split(':', 2)
+      headers[key.downcase] = value.strip
+    end
+    requests << [line, JSON.parse(socket.read(Integer(headers.fetch('content-length'))))]
+    # Hold SES's response until Rails has received durable ownership.
+    release_provider.pop if queued
+    response = '{"MessageId":"commonshare-control-id"}'
+    socket.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{response.bytesize}\r\nConnection: close\r\n\r\n#{response}")
+    socket.close
   end
-  requests << [line, JSON.parse(socket.read(Integer(headers.fetch('content-length'))))]
-  response = '{"MessageId":"commonshare-control-id"}'
-  socket.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{response.bytesize}\r\nConnection: close\r\n\r\n#{response}")
 ensure
   socket&.close
 end
@@ -60,7 +85,9 @@ begin
   port = smoke_port
   endpoint = "http://127.0.0.1:#{port}/internal/mail/send"
   config = File.join(directory, 'hailer.toml')
-  File.write(config, "threads = 2\nshutdown_timeout_seconds = 5\n")
+  settings = "threads = 2\nshutdown_timeout_seconds = 5\n"
+  settings += "ses_configuration_set = \"hailer-feedback\"\n[queued]\nmax_bytes = 1048576\nmax_messages = 10\n" if queued
+  File.write(config, settings)
   manifest = File.join(directory, 'manifest.toml')
   File.write(manifest, <<~TOML)
     [mothership]
@@ -74,7 +101,7 @@ begin
     workers = 0
     threads = 2
     boot_timeout = 30
-    routes = [{ bind = "mail", pattern = "^/internal/mail/(send|events|health|ready)$" }]
+    routes = [{ bind = "mail", pattern = "^/internal/mail/(send|events|health|ready|intake-ready|dispatch-ready|messages|messages/events|messages/[0-9a-f-]{36})$" }]
   TOML
   mothership = File.join(Gem.loaded_specs.fetch('guardship').full_gem_path, 'libexec/mothership')
   log = File.join(directory, 'mothership.log')
@@ -92,16 +119,26 @@ begin
       raise 'Mothership exited before readiness' if Process.wait(pid, Process::WNOHANG)
 
       begin
-        response = Net::HTTP.new('127.0.0.1', port, nil).get('/internal/mail/ready')
-        break if response.code == '200' && JSON.parse(response.body).fetch('ready')
+        break if smoke_ready?(port, '/internal/mail/ready')
       rescue Errno::ECONNREFUSED, EOFError, IOError
         # Bay is still starting.
       end
       sleep 0.1
     end
   end
-  HailerControlProbeMailer.delivery_method = :hailer
-  HailerControlProbeMailer.hailer_settings = { endpoint: endpoint, read_timeout: 5 }
+  HailerControlProbeMailer.delivery_method = queued ? :hailer_queued : :hailer
+  if queued
+    HailerControlProbeMailer.hailer_queued_settings = {
+      endpoint: endpoint, read_timeout: 5, submission_key: 'commonshare-loopback-probe'
+    }
+    %w[intake-ready dispatch-ready].each do |path|
+      Timeout.timeout(10) do
+        sleep 0.1 until smoke_ready?(port, "/internal/mail/#{path}")
+      end
+    end
+  else
+    HailerControlProbeMailer.hailer_settings = { endpoint: endpoint, read_timeout: 5 }
+  end
   ActiveRecord::Base.transaction(requires_new: true) do
     message = HailerControlProbeMailer.probe.deliver_now
     line, request = Timeout.timeout(5) { requests.pop }
@@ -110,16 +147,53 @@ begin
     smoke_assert(request.dig('Destination', 'BccAddresses') == ['copy@example.com'], 'Bcc envelope')
     parsed = Mail.read_from_string(Base64.strict_decode64(request.dig('Content', 'Raw', 'Data')))
     smoke_assert(parsed.attachments.first.decoded.b == "\x00\x01\xff".b, 'attachment integrity')
-    smoke_assert(message.header[:ses_message_id].value == 'commonshare-control-id', 'acceptance ID')
     history = Platform::OutgoingEmail.find_by!(message_id: message.message_id)
-    smoke_assert(history.headers['ses_message_id'] == 'commonshare-control-id', 'CommonShare observer')
+    if queued
+      id = message.header[:hailer_message_id]&.value
+      smoke_assert(id && Hailer::LifecycleClient::ID.match?(id), 'durable ownership ID')
+      smoke_assert(message.header[:ses_message_id].nil?, 'no fabricated SES ID')
+      smoke_assert(history.headers['ses_message_id'].nil?, 'legacy observer must not invent acceptance')
+      lifecycle = Hailer::LifecycleClient.new(endpoint: endpoint)
+      smoke_assert(lifecycle.status(id).state == 'dispatching', '202 before provider acceptance')
+      smoke_assert(request.fetch('ConfigurationSetName') == 'hailer-feedback', 'configuration set')
+      tags = request.fetch('EmailTags').to_h { |tag| [tag.fetch('Name'), tag.fetch('Value')] }
+      smoke_assert(tags['hailer_message_id'] == id && Hailer::LifecycleClient::ID.match?(tags.fetch('hailer_attempt_id')), 'correlation tags')
+      release_provider << true
+      Timeout.timeout(10) do
+        sleep 0.05 until lifecycle.status(id).state == 'accepted'
+      end
+      status = lifecycle.status(id)
+      smoke_assert(!status.body_present && status.provider_message_id == 'commonshare-control-id', 'accepted and purged')
+      smoke_assert(status.attempts.one? && status.attempts.first['phase'] == 'accepted', 'attempt journal')
+      payload = {
+        raw_mime: Base64.strict_decode64(request.dig('Content', 'Raw', 'Data')),
+        to_addresses: ['recipient@example.com'], cc_addresses: [], bcc_addresses: ['copy@example.com']
+      }
+      client = Hailer::QueuedClient.new(endpoint: endpoint)
+      replay = client.submit(payload, submission_key: 'commonshare-loopback-probe')
+      smoke_assert(replay.hailer_message_id == id, 'same receipt after purge')
+      begin
+        client.submit(payload.merge(raw_mime: "#{payload[:raw_mime]}changed"),
+                      submission_key: 'commonshare-loopback-probe')
+        raise 'changed replay was not rejected'
+      rescue Hailer::SubmissionConflictError
+        # Immutable intent cannot be overwritten.
+      end
+      page = lifecycle.poll(after: 0)
+      smoke_assert(page.events.any? { |event| event.kind == 'body_purged' }, 'lifecycle route')
+      sleep 0.5
+      smoke_assert(requests.empty?, 'replay and conflict never resend')
+    else
+      smoke_assert(message.header[:ses_message_id].value == 'commonshare-control-id', 'acceptance ID')
+      smoke_assert(history.headers['ses_message_id'] == 'commonshare-control-id', 'CommonShare observer')
+    end
     raise ActiveRecord::Rollback
   end
   smoke_assert(Hailer::FeedbackClient.new(endpoint: endpoint).poll(after: 0).events.empty?, 'feedback contract')
   health = JSON.parse(Net::HTTP.new('127.0.0.1', port, nil).get('/internal/mail/health').body)
   smoke_assert(health.fetch('version') == '0.2.0' && health.fetch('ready'), 'controller health')
-  fixture.value
-  puts "CommonShare smoke passed: Rails #{Rails.version}, Ruby #{RUBY_VERSION}, client #{Hailer::VERSION}, service #{health.fetch('version')}; no external mail."
+  smoke_assert(fixture.alive?, 'loopback fixture failed')
+  puts "CommonShare #{queued ? 'queued' : 'sync'} smoke passed: Rails #{Rails.version}, Ruby #{RUBY_VERSION}, client #{Hailer::VERSION} (#{Gem.loaded_specs.fetch('hailer').platform}), service #{health.fetch('version')}; no external mail."
 rescue StandardError
   warn File.read(log) if log && File.exist?(log)
   raise

@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use async_trait::async_trait;
 use aws_sdk_sesv2::error::ProvideErrorMetadata;
 use aws_sdk_sesv2::types::SuppressionListReason;
 
@@ -35,11 +34,8 @@ impl AwsSuppressions {
             account.len() == 12 && account.bytes().all(|byte| byte.is_ascii_digit()),
             "invalid AWS account"
         );
-        let client_config = aws_sdk_sesv2::config::Builder::from(config)
-            .retry_config(aws_sdk_sesv2::config::retry::RetryConfig::disabled())
-            .build();
         Ok(Self {
-            client: aws_sdk_sesv2::Client::from_conf(client_config),
+            client: crate::aws_client::ses_client(config, None),
             scope: format!("ses:{account}:{region}"),
             account,
             region,
@@ -47,7 +43,6 @@ impl AwsSuppressions {
     }
 }
 
-#[async_trait]
 impl Source for AwsSuppressions {
     fn scope(&self) -> &str {
         &self.scope

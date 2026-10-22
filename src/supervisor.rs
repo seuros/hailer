@@ -10,23 +10,36 @@ use tracing::{info, warn};
 
 use crate::config::{Config, DockingConfig};
 use crate::control::Control;
-use crate::provider::MailProvider;
+use crate::provider::guard::SuppressionGuard;
+use crate::provider::queued::QueuedProvider;
 use crate::runtime::Runtime;
 use crate::state::Store;
 
-pub async fn run(
+pub async fn run<P: QueuedProvider + 'static>(
     docking: DockingConfig,
     config: Config,
     aws: aws_config::SdkConfig,
-    provider: Arc<dyn MailProvider>,
+    provider: Arc<P>,
     store: Store,
     control: Arc<Control>,
 ) -> anyhow::Result<()> {
-    let runtime =
-        Runtime::new(control, config.feedback.is_some(), config.suppression_sync.is_some());
+    let runtime = Runtime::new(
+        control,
+        config.feedback.is_some(),
+        config.suppression_sync.is_some(),
+        config.queued,
+    );
     let stop = CancellationToken::new();
     let mut tasks = JoinSet::new();
-    tasks.spawn(crate::bay::serve(docking, provider, store.clone(), runtime.clone(), stop.clone()));
+    let guarded = Arc::new(SuppressionGuard {
+        inner: provider.clone(),
+        store: store.clone(),
+        control: runtime.control.clone(),
+    });
+    tasks.spawn(crate::bay::serve(docking, guarded, store.clone(), runtime.clone(), stop.clone()));
+    if runtime.queued.is_some() {
+        tasks.spawn(crate::outbound::run(provider, store.clone(), runtime.clone(), stop.clone()));
+    }
     if let Some(feedback) = config.feedback {
         let queue = crate::feedback::AwsQueue::new(&aws, feedback.queue_url.clone());
         let (store, runtime, stop) = (store.clone(), runtime.clone(), stop.clone());

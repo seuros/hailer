@@ -32,9 +32,9 @@ use crate::state::Store;
 /// Bind the docking socket and serve links until the process exits. A link
 /// that drops is not re-accepted under the same slot — mothership relaunches
 /// the whole process if it loses more links than it can spare.
-pub async fn serve(
+pub async fn serve<P: MailProvider + 'static>(
     docking: DockingConfig,
-    provider: Arc<dyn MailProvider>,
+    provider: Arc<P>,
     store: Store,
     runtime: Arc<Runtime>,
     stop: CancellationToken,
@@ -74,10 +74,10 @@ pub async fn serve(
     Ok(())
 }
 
-async fn handle_link(
+async fn handle_link<P: MailProvider>(
     mut stream: UnixStream,
     ship_name: &str,
-    provider: Arc<dyn MailProvider>,
+    provider: Arc<P>,
     store: Store,
     runtime: Arc<Runtime>,
     stop: CancellationToken,

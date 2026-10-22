@@ -20,17 +20,19 @@ impl Fake {
     }
 }
 
-#[async_trait]
 impl Source for Fake {
     fn scope(&self) -> &str {
         self.scope
     }
 
-    async fn page(&self, token: Option<&str>) -> Result<Page, ReadError> {
+    fn page(
+        &self,
+        token: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<Page, ReadError>> + Send {
         let (expected, result) =
             self.steps.lock().expect("steps").pop_front().expect("unexpected read");
         assert_eq!(token, expected.as_deref());
-        result
+        std::future::ready(result)
     }
 }
 

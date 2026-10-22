@@ -142,6 +142,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         merge_all(&mut transaction, &records).await?;
+        self.correlate_feedback(&mut transaction, event).await?;
         transaction.commit().await?;
         Ok(true)
     }

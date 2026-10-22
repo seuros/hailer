@@ -4,6 +4,7 @@ require_relative 'test_helper'
 
 class DeliveryMethodTest < Minitest::Test
   include HttpHarness
+  include MailFixtures
 
   def test_preserves_rendered_mime_and_recipient_groups
     message = build_message
@@ -93,16 +94,5 @@ class DeliveryMethodTest < Minitest::Test
 
   def delivery(server)
     Hailer::DeliveryMethod.new(endpoint: server.endpoint)
-  end
-
-  def build_message
-    Mail.new do
-      from 'Alice Example <alice@example.com>'
-      to 'to@example.com'
-      cc 'cc@example.com'
-      bcc 'bcc@example.com'
-      subject 'Delivery parity'
-      body 'Hello from Rails.'
-    end
   end
 end

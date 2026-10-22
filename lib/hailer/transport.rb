@@ -10,7 +10,7 @@ module Hailer
     DEFAULTS = { open_timeout: 5, read_timeout: 30, write_timeout: 30 }.freeze
     MAX_RESPONSE_BYTES = 65_536
     HTTP_ERRORS = {
-      400 => ValidationError, 422 => ValidationError, 429 => RateLimitedError,
+      400 => ValidationError, 409 => SubmissionConflictError, 422 => ValidationError, 429 => RateLimitedError,
       502 => RejectedError, 503 => UnavailableError
     }.freeze
 
@@ -32,22 +32,36 @@ module Hailer
     end
 
     def post(path, payload, max_response_bytes: MAX_RESPONSE_BYTES)
+      post_serialized(path, JSON.generate(payload), max_response_bytes: max_response_bytes)
+    end
+
+    # Queued intake owns retries and passes the same serialized bytes each time.
+    # Synchronous sends continue to require HTTP 200 and never retry.
+    def post_serialized(path, body, expected_status: 200, max_response_bytes: MAX_RESPONSE_BYTES)
       request = Net::HTTP::Post.new(path)
       request.content_type = 'application/json'
+      request.body = body
+      exchange_document(request, expected_status, max_response_bytes)
+    end
+
+    def get(path, max_response_bytes: MAX_RESPONSE_BYTES)
+      exchange_document(Net::HTTP::Get.new(path), 200, max_response_bytes)
+    end
+
+    private
+
+    def exchange_document(request, expected_status, max_response_bytes)
       request['Accept'] = 'application/json'
-      request.body = JSON.generate(payload)
       http = Net::HTTP.new(@uri.hostname, @uri.port, nil)
       http.use_ssl = @uri.scheme == 'https'
       http.max_retries = 0
       @timeouts.each { |name, value| http.public_send(:"#{name}=", value) }
       status, body = exchange(http, request, max_response_bytes)
-      decode_response(status, body)
+      decode_response(status, body, expected_status)
     rescue Timeout::Error, IOError, EOFError, SystemCallError, SocketError,
            OpenSSL::SSL::SSLError, Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError => error
       raise TransportError, "Hailer transport failed (#{error.class}); delivery outcome may be unknown"
     end
-
-    private
 
     def exchange(http, request, limit)
       status = nil
@@ -65,11 +79,11 @@ module Hailer
       [status, body]
     end
 
-    def decode_response(status, body)
+    def decode_response(status, body, expected_status)
       document = JSON.parse(body)
       raise ProtocolError, 'Hailer response must be a JSON object' unless document.is_a?(Hash)
 
-      unless status == 200
+      unless status == expected_status
         message = document['error']
         message = "Hailer returned HTTP #{status}" unless message.is_a?(String) && !message.empty?
         if status == 503 && document['code'] == 'outcome_unknown'

@@ -3,6 +3,11 @@ threads = 2
 database_pool_size = 5
 shutdown_timeout_seconds = 30
 
+# Optional SES event-publishing configuration set. Its events must include mail
+# tags and reach the dedicated SNS/SQS feedback route to resolve unknown sends.
+# Otherwise configure an appropriate default set on the sending identity.
+# ses_configuration_set = "hailer-feedback"
+
 # Opt in: initial AWS account/region sync gates send readiness.
 [suppression_sync]
 interval_seconds = 3600
@@ -11,6 +16,13 @@ interval_seconds = 3600
 # [rate_limit]
 # recipients_per_second = 10.0
 # burst = 50
+
+# In development: durable intake requires explicit logical payload budgets.
+# Requires the durable-dispatch build, not the existing 0.2 release candidates.
+# [queued]
+# max_bytes = 268435456
+# max_messages = 10000
+# unknown_retention_seconds = 604800
 
 [feedback]
 # Dedicated queue; subscribe the SNS topic with RawMessageDelivery=false.

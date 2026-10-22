@@ -21,6 +21,9 @@ pub enum EventKind {
 /// No SNS envelope, AWS subscriptions, or SES-shaped payload in the app API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackEvent {
+    /// Internal correlation only; never change the legacy feedback wire schema.
+    #[serde(skip)]
+    pub correlation: Option<crate::outbound::Correlation>,
     pub event_id: String,
     pub kind: EventKind,
     pub provider: String,
@@ -52,9 +55,7 @@ impl FeedbackEvent {
         ensure!(!notification.message_id.trim().is_empty(), "missing SNS message id");
         let event: Value =
             serde_json::from_str(&notification.message).context("invalid SES feedback")?;
-        let event_type = event["eventType"]
-            .as_str()
-            .or_else(|| event["notificationType"].as_str())
+        let event_type = str_or(&event["eventType"], &event["notificationType"])
             .context("missing SES event type")?;
         let (kind, detail_name, recipients_name) = match event_type {
             "Delivery" => (EventKind::Delivered, "delivery", Some("recipients")),
@@ -72,7 +73,7 @@ impl FeedbackEvent {
         ensure!(detail.is_object(), "missing SES event detail");
         let mail = &event["mail"];
         let provider_message_id = string(&mail["messageId"], "missing SES message id")?;
-        let timestamp = detail["timestamp"].as_str().or_else(|| mail["timestamp"].as_str());
+        let timestamp = str_or(&detail["timestamp"], &mail["timestamp"]);
         let occurred_at = timestamp
             .context("missing SES event timestamp")?
             .parse::<jiff::Timestamp>()
@@ -84,7 +85,7 @@ impl FeedbackEvent {
             .context("missing SES event recipients")?
             .iter()
             .map(|recipient| {
-                let address = recipient.as_str().or_else(|| recipient["emailAddress"].as_str());
+                let address = str_or(recipient, &recipient["emailAddress"]);
                 let address = address.context("missing recipient address")?;
                 ensure!(
                     email_address::EmailAddress::is_valid(address),
@@ -126,6 +127,7 @@ impl FeedbackEvent {
             .or_else(|| mail["commonHeaders"]["messageId"].as_str().map(str::to_string));
 
         Ok(Self {
+            correlation: correlation(&mail["tags"]),
             event_id: format!("{}:{}", notification.topic_arn, notification.message_id),
             kind,
             provider: "ses".into(),
@@ -136,6 +138,28 @@ impl FeedbackEvent {
             suppression,
         })
     }
+}
+
+fn correlation(tags: &Value) -> Option<crate::outbound::Correlation> {
+    let unique = |name: &str| {
+        let values = tags[name].as_array()?;
+        if values.len() != 1 {
+            return None;
+        }
+        let value = values[0].as_str()?;
+        crate::outbound::valid_id(value).then(|| value.to_owned())
+    };
+    Some(crate::outbound::Correlation {
+        hailer_message_id: unique("hailer_message_id")?,
+        attempt_id: unique("hailer_attempt_id")?,
+    })
+}
+
+/// SES/SNS reports some fields at one of two locations depending on event
+/// type or library version (event type, timestamps, recipient shape).
+/// Reads `primary` as a string, falling back to `fallback` when absent.
+fn str_or<'a>(primary: &'a Value, fallback: &'a Value) -> Option<&'a str> {
+    primary.as_str().or_else(|| fallback.as_str())
 }
 
 fn string(value: &Value, message: &'static str) -> anyhow::Result<String> {

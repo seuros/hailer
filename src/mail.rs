@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One `deliver!` call, as posted by `Hailer::DeliveryMethod`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendRequest {
     /// Full raw MIME message (`message.to_s`).
     pub raw_mime: String,

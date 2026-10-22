@@ -10,14 +10,13 @@ use crate::mail::SendRequest;
 use crate::provider::{MailProvider, ProviderError};
 use crate::state::{Store, normalize};
 
-pub struct SuppressionGuard {
-    pub inner: Arc<dyn MailProvider>,
+pub struct SuppressionGuard<P> {
+    pub inner: Arc<P>,
     pub store: Store,
     pub control: Arc<Control>,
 }
 
-#[async_trait::async_trait]
-impl MailProvider for SuppressionGuard {
+impl<P: MailProvider> MailProvider for SuppressionGuard<P> {
     async fn send(&self, request: &SendRequest) -> Result<String, ProviderError> {
         let validation = request.validate();
         let mut snapshot = Snapshot {

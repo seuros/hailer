@@ -37,10 +37,8 @@ class FeedbackTest < Minitest::Test
       { events: [entry(kind: 'unknown')], next_cursor: 1 },
       { events: [{ sequence: 1, event: nil }], next_cursor: 1 }
     ].each do |document|
-      with_server(body: JSON.generate(document)) do |server|
-        assert_raises(Hailer::ProtocolError) do
-          Hailer::FeedbackClient.new(endpoint: server.endpoint).poll(after: 0)
-        end
+      assert_protocol_error(body: JSON.generate(document)) do |server|
+        Hailer::FeedbackClient.new(endpoint: server.endpoint).poll(after: 0)
       end
     end
   end

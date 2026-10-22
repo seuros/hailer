@@ -3,7 +3,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::test_support::{ADDRESS, TOPIC, notification, ses};
@@ -102,10 +101,11 @@ struct FakeQueue {
     acknowledged: Mutex<Vec<String>>,
 }
 
-#[async_trait]
 impl FeedbackQueue for FakeQueue {
-    async fn receive(&self) -> anyhow::Result<Vec<QueuedMessage>> {
-        Ok(Vec::new())
+    fn receive(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<QueuedMessage>>> + Send {
+        std::future::ready(Ok(Vec::new()))
     }
 
     async fn delete(&self, receipt: &str) -> anyhow::Result<()> {
@@ -163,7 +163,6 @@ struct DrainingQueue {
     acknowledged: AtomicBool,
 }
 
-#[async_trait]
 impl FeedbackQueue for DrainingQueue {
     async fn receive(&self) -> anyhow::Result<Vec<QueuedMessage>> {
         if self.received.swap(true, Ordering::SeqCst) {
@@ -199,6 +198,7 @@ async fn shutdown_finishes_the_current_commit_and_ack_but_leaves_the_batch_tail(
         Arc::new(crate::control::Control::new(None, true).expect("control")),
         true,
         false,
+        None,
     );
     let stop = CancellationToken::new();
     let task = tokio::spawn({

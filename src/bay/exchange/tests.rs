@@ -34,11 +34,13 @@ impl FakeProvider {
     }
 }
 
-#[async_trait::async_trait]
 impl MailProvider for FakeProvider {
-    async fn send(&self, request: &SendRequest) -> Result<String, ProviderError> {
+    fn send(
+        &self,
+        request: &SendRequest,
+    ) -> impl std::future::Future<Output = Result<String, ProviderError>> + Send {
         self.requests.lock().expect("request lock").push(request.clone());
-        match self.outcome {
+        std::future::ready(match self.outcome {
             Outcome::Accepted => Ok("ses-test-id".into()),
             Outcome::InvalidAddress => Err(ProviderError::InvalidAddress("bad-address".into())),
             Outcome::NoRecipients => Err(ProviderError::NoRecipients),
@@ -47,14 +49,14 @@ impl MailProvider for FakeProvider {
             Outcome::Unavailable => Err(ProviderError::Transport("circuit open".into())),
             Outcome::Ambiguous => Err(ProviderError::Ambiguous),
             Outcome::RateLimited => Err(ProviderError::RateLimited),
-        }
+        })
     }
 }
 
 #[tokio::test]
 async fn ruby_request_reaches_the_provider_without_rewriting_mail_or_envelopes() {
     let fake = FakeProvider::new(Outcome::Accepted);
-    let provider: Arc<dyn MailProvider> = fake.clone();
+    let provider = fake.clone();
     let (status, body) = handle(b"POST", SEND_PATH.as_bytes(), RUBY_REQUEST, &provider).await;
     assert_eq!(status, 200);
     assert_eq!(
@@ -76,7 +78,7 @@ async fn ruby_request_reaches_the_provider_without_rewriting_mail_or_envelopes()
 #[tokio::test]
 async fn malformed_requests_never_call_the_provider() {
     let fake = FakeProvider::new(Outcome::Accepted);
-    let provider: Arc<dyn MailProvider> = fake.clone();
+    let provider = fake.clone();
     for body in [b"not json".as_slice(), b"{}", br#"{"raw_mime":7}"#] {
         let (status, response) = handle(b"POST", SEND_PATH.as_bytes(), body, &provider).await;
         assert_eq!(status, 400);
@@ -89,7 +91,7 @@ async fn malformed_requests_never_call_the_provider() {
 #[tokio::test]
 async fn unrelated_routes_never_send_mail() {
     let fake = FakeProvider::new(Outcome::Accepted);
-    let provider: Arc<dyn MailProvider> = fake.clone();
+    let provider = fake.clone();
     for (method, path) in [(b"GET".as_slice(), SEND_PATH.as_bytes()), (b"POST", b"/other")] {
         let (status, _) = handle(method, path, RUBY_REQUEST, &provider).await;
         assert_eq!(status, 404);
@@ -108,7 +110,7 @@ async fn provider_failures_use_the_statuses_the_gem_understands() {
         (Outcome::Ambiguous, 503),
         (Outcome::RateLimited, 429),
     ] {
-        let provider: Arc<dyn MailProvider> = FakeProvider::new(outcome);
+        let provider = FakeProvider::new(outcome);
         let (status, body) = handle(b"POST", SEND_PATH.as_bytes(), RUBY_REQUEST, &provider).await;
         assert_eq!(status, expected_status);
         let error: Value = serde_json::from_slice(&body).expect("error JSON");
@@ -175,18 +177,126 @@ fn absent_optional_envelopes_deserialize_as_empty_not_null_recipients() {
 }
 
 fn request_frames(request_id: u32) -> Vec<u8> {
+    route_frames(request_id, b"POST", SEND_PATH.as_bytes(), RUBY_REQUEST)
+}
+
+fn route_frames(request_id: u32, method: &[u8], path: &[u8], body: &[u8]) -> Vec<u8> {
     let mut hail = HailFrame::default();
-    hail.param(b"REQUEST_METHOD", b"POST");
-    hail.param(b"PATH_INFO", SEND_PATH.as_bytes());
+    hail.param(b"REQUEST_METHOD", method);
+    hail.param(b"PATH_INFO", path);
     let mut frames = hail
-        .seal(request_id, RUBY_REQUEST.len().try_into().expect("request length"))
+        .seal(request_id, body.len().try_into().expect("request length"))
         .expect("HAIL")
         .to_vec();
-    let chunks: Vec<_> = RUBY_REQUEST.chunks(31).collect();
+    let chunks: Vec<_> = body.chunks(31).collect();
     for (index, chunk) in chunks.iter().enumerate() {
         push_haul(&mut frames, request_id, index + 1 == chunks.len(), chunk).expect("HAUL");
     }
     frames
+}
+
+#[tokio::test]
+async fn queued_protocol_commits_before_acceptance_without_calling_the_provider() {
+    let database = crate::test_support::database().await;
+    let store = Store::connect(database.url(), 5).await.expect("store");
+    let runtime = Runtime::new(
+        Arc::new(crate::control::Control::new(None, false).expect("control")),
+        false,
+        true,
+        Some(crate::config::QueuedConfig {
+            max_bytes: 1_000_000,
+            max_messages: 10,
+            unknown_retention_seconds: 604_800,
+        }),
+    );
+    let provider = FakeProvider::new(Outcome::Accepted);
+    let stop = CancellationToken::new();
+    let (mut client, ship) = duplex(16_384);
+    let task = tokio::spawn(serve_link(
+        ship,
+        BytesMut::new(),
+        provider.clone(),
+        store.clone(),
+        runtime.clone(),
+        stop.clone(),
+    ));
+    let mut command: Value = serde_json::from_slice(RUBY_REQUEST).expect("fixture");
+    command["submission_key"] = serde_json::json!("rails-intent");
+    let body = serde_json::to_vec(&command).expect("command");
+    client
+        .write_all(&route_frames(1, b"POST", MESSAGES_PATH.as_bytes(), &body))
+        .await
+        .expect("intake");
+    let mut pending = BytesMut::new();
+    let (status, receipt) = json_reply(&mut client, &mut pending, 1).await;
+    assert_eq!(status, 202);
+    assert!(receipt.get("message_id").is_none());
+    let id = receipt["hailer_message_id"].as_str().expect("hailer id");
+    assert!(store.message_status(id).await.expect("committed").is_some());
+    assert!(provider.requests.lock().expect("requests").is_empty());
+    assert!(!runtime.health(true, "open").ready);
+    let path = format!("{MESSAGES_PATH}/{id}");
+    client.write_all(&route_frames(2, b"GET", path.as_bytes(), b"")).await.expect("status");
+    let (status, document) = json_reply(&mut client, &mut pending, 2).await;
+    assert_eq!(status, 200);
+    assert_eq!(document["status"], "queued");
+    assert!(document.get("raw_mime").is_none());
+    client
+        .write_all(&route_frames(3, b"GET", INTAKE_READY_PATH.as_bytes(), b""))
+        .await
+        .expect("ready");
+    let (status, document) = json_reply(&mut client, &mut pending, 3).await;
+    assert_eq!(status, 200);
+    assert_eq!(document["ready"], true);
+    client
+        .write_all(&route_frames(4, b"POST", LIFECYCLE_PATH.as_bytes(), br#"{"after":0}"#))
+        .await
+        .expect("feed");
+    let (status, document) = json_reply(&mut client, &mut pending, 4).await;
+    assert_eq!(status, 200);
+    assert_eq!(document["events"][0]["event"]["kind"], "queued");
+    assert!(store.events(0, 100).await.expect("old feed").events.is_empty());
+    stop.cancel();
+    task.await.expect("task").expect("stop");
+}
+
+#[tokio::test]
+async fn queued_routes_reject_unconfigured_intake_and_invalid_queries() {
+    let database = crate::test_support::database().await;
+    let store = Store::connect(database.url(), 5).await.expect("store");
+    let disabled = runtime(true);
+    assert_eq!(
+        queued_route(b"POST", MESSAGES_PATH.as_bytes(), b"{}", &store, &disabled)
+            .await
+            .expect("route")
+            .0,
+        503
+    );
+    assert_eq!(
+        queued_route(b"GET", INTAKE_READY_PATH.as_bytes(), b"", &store, &disabled)
+            .await
+            .expect("route")
+            .0,
+        503
+    );
+    assert_eq!(
+        queued_route(b"GET", b"/internal/mail/messages/not-a-uuid", b"", &store, &disabled)
+            .await
+            .expect("route")
+            .0,
+        404
+    );
+    for body in
+        [br#"{"limit":0}"#.as_slice(), br#"{"after":18446744073709551615}"#, br#"{"unknown":1}"#]
+    {
+        assert_eq!(
+            queued_route(b"POST", LIFECYCLE_PATH.as_bytes(), body, &store, &disabled)
+                .await
+                .expect("route")
+                .0,
+            400
+        );
+    }
 }
 
 async fn accepted_reply(stream: &mut DuplexStream, pending: &mut BytesMut, request_id: u32) {
@@ -231,6 +341,7 @@ fn runtime(bootstrapped: bool) -> Arc<Runtime> {
         Arc::new(crate::control::Control::new(None, bootstrapped).expect("control")),
         false,
         !bootstrapped,
+        None,
     )
 }
 
@@ -238,7 +349,7 @@ fn runtime(bootstrapped: bool) -> Arc<Runtime> {
 async fn chunked_docking_requests_return_acceptance_and_reuse_the_link() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let fake = FakeProvider::new(Outcome::Accepted);
-        let provider: Arc<dyn MailProvider> = fake.clone();
+        let provider = fake.clone();
         let (mut mothership, ship) = duplex(16_384);
         // Exercise bytes left over by the docking handshake as well as
         // subsequent reads from the same link.
@@ -268,7 +379,7 @@ async fn chunked_docking_requests_return_acceptance_and_reuse_the_link() {
 #[tokio::test]
 async fn mismatched_body_request_id_closes_the_link_without_sending() {
     let fake = FakeProvider::new(Outcome::Accepted);
-    let provider: Arc<dyn MailProvider> = fake.clone();
+    let provider = fake.clone();
     let (mut mothership, ship) = duplex(4096);
     let mut hail = HailFrame::default();
     hail.param(b"REQUEST_METHOD", b"POST");
@@ -330,7 +441,6 @@ struct DelayedProvider {
     finish: tokio::sync::Notify,
 }
 
-#[async_trait::async_trait]
 impl MailProvider for DelayedProvider {
     async fn send(&self, _: &SendRequest) -> Result<String, ProviderError> {
         self.started.notify_one();

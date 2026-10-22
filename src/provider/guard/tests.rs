@@ -7,11 +7,13 @@ use crate::feedback::test_support::{ADDRESS, hard_bounce};
 #[derive(Default)]
 struct FakeSender(Mutex<Vec<SendRequest>>);
 
-#[async_trait::async_trait]
 impl MailProvider for FakeSender {
-    async fn send(&self, request: &SendRequest) -> Result<String, ProviderError> {
+    fn send(
+        &self,
+        request: &SendRequest,
+    ) -> impl std::future::Future<Output = Result<String, ProviderError>> + Send {
         self.0.lock().expect("requests").push(request.clone());
-        Ok("ses-id".into())
+        std::future::ready(Ok("ses-id".into()))
     }
 }
 

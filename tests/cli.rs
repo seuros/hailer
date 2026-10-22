@@ -44,3 +44,58 @@ fn missing_database_configuration_fails_without_echoing_a_secret() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("set HAILER_DATABASE_URL"));
 }
+
+#[tokio::test]
+async fn operator_commands_are_available_without_mothership_or_aws() {
+    let database = support::database().await;
+    for (arguments, expected) in [
+        (
+            vec!["message-status", "--id", "a74698dd-ecc2-45ac-a4ce-01abf5524578"],
+            "message not found",
+        ),
+        (
+            vec!["cancel-message", "--id", "a74698dd-ecc2-45ac-a4ce-01abf5524578", "--reason", ""],
+            "nonempty audit reason",
+        ),
+        (
+            vec![
+                "resolve-message",
+                "--id",
+                "a74698dd-ecc2-45ac-a4ce-01abf5524578",
+                "--outcome",
+                "invalid",
+                "--reason",
+                "test",
+            ],
+            "outcome must be",
+        ),
+        (
+            vec![
+                "resolve-message",
+                "--id",
+                "a74698dd-ecc2-45ac-a4ce-01abf5524578",
+                "--attempt-id",
+                "invalid",
+                "--outcome",
+                "not-accepted",
+                "--reason",
+                "test",
+            ],
+            "invalid attempt ID",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_hailer"))
+            .args(arguments)
+            .env("HAILER_DATABASE_URL", database.url())
+            .env("AWS_EC2_METADATA_DISABLED", "true")
+            .env_remove("MS_PID")
+            .env_remove("MS_SHIP")
+            .env_remove("HAILER_CONFIG")
+            .output()
+            .expect("operator command");
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("must run under Mothership"));
+    }
+}

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn health_reflects_bootstrap_storage_failure_and_drain_without_leaking_data() {
     let control = Arc::new(Control::new(None, false).expect("control"));
-    let runtime = Runtime::new(control, true, true);
+    let runtime = Runtime::new(control, true, true, None);
     assert_eq!(runtime.health(true, "closed").phase, "starting");
     runtime.sync_error();
     assert!(!runtime.health(true, "closed").ready);
@@ -28,4 +28,27 @@ fn health_reflects_bootstrap_storage_failure_and_drain_without_leaking_data() {
     for forbidden in ["postgres://", "recipient", "raw_mime", "next_token", "queue_url"] {
         assert!(!json.contains(forbidden));
     }
+}
+
+#[test]
+fn dispatcher_readiness_requires_a_live_worker_without_changing_sync_readiness() {
+    let control = Arc::new(Control::new(None, true).expect("control"));
+    let runtime = Runtime::new(
+        control,
+        false,
+        false,
+        Some(crate::config::QueuedConfig {
+            max_bytes: 1000,
+            max_messages: 10,
+            unknown_retention_seconds: 604_800,
+        }),
+    );
+    assert!(runtime.health(true, "closed").ready);
+    assert!(!runtime.dispatcher_ready(true, "closed"));
+    runtime.dispatch_state(true);
+    assert!(runtime.dispatcher_ready(true, "closed"));
+    assert!(!runtime.dispatcher_ready(true, "open"));
+    assert!(!runtime.dispatcher_ready(false, "closed"));
+    runtime.dispatch_state(false);
+    assert!(!runtime.dispatcher_ready(true, "closed"));
 }

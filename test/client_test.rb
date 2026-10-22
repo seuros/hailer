@@ -49,22 +49,17 @@ class ClientTest < Minitest::Test
 
   def test_rejects_invalid_success_responses
     ['not json', '[]', 'null', '{}', '{"message_id":null}', '{"message_id":4}', '{"message_id":" "}'].each do |body|
-      with_server(body: body) do |server|
-        assert_raises(Hailer::ProtocolError) { client(server).deliver({}) }
-      end
+      assert_protocol_error(body: body) { |server| client(server).deliver({}) }
     end
   end
 
   def test_invalid_error_json_is_a_protocol_error_not_a_success
-    with_server(status: 502, body: '<html>Bad gateway</html>') do |server|
-      assert_raises(Hailer::ProtocolError) { client(server).deliver({}) }
-    end
+    assert_protocol_error(status: 502, body: '<html>Bad gateway</html>') { |server| client(server).deliver({}) }
   end
 
   def test_limits_response_size
-    with_server(body: JSON.generate(message_id: 'x' * Hailer::Transport::MAX_RESPONSE_BYTES)) do |server|
-      assert_raises(Hailer::ProtocolError) { client(server).deliver({}) }
-    end
+    oversized = JSON.generate(message_id: 'x' * Hailer::Transport::MAX_RESPONSE_BYTES)
+    assert_protocol_error(body: oversized) { |server| client(server).deliver({}) }
   end
 
   def test_connection_loss_is_reported_as_an_ambiguous_transport_failure
@@ -72,6 +67,7 @@ class ClientTest < Minitest::Test
       error = assert_raises(Hailer::TransportError) { client(server).deliver({}) }
       assert_match(/outcome may be unknown/, error.message)
       assert_equal({}, server.payload)
+      assert_equal 1, server.requests.size
     end
   end
 

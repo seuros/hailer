@@ -11,6 +11,14 @@ module Hailer
     end
 
     def deliver!(message)
+      Client.new(**settings).deliver(payload_for(message)).tap do |response|
+        message.header[:ses_message_id] = response.message_id
+      end
+    end
+
+    private
+
+    def payload_for(message)
       payload = {
         raw_mime: message.to_s,
         to_addresses: Array(explicit_envelope?(message, :to) ? message.smtp_envelope_to : message.to),
@@ -23,12 +31,8 @@ module Hailer
         payload[:from_email_address] = message.smtp_envelope_from
       end
 
-      Client.new(**settings).deliver(payload).tap do |response|
-        message.header[:ses_message_id] = response.message_id
-      end
+      payload
     end
-
-    private
 
     # Match the existing SESv2 adapter's distinction between Mail's computed
     # defaults and explicitly assigned SMTP envelope addresses.

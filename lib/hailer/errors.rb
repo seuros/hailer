@@ -19,6 +19,7 @@ module Hailer
   end
 
   class ValidationError < DeliveryError; end
+  class SubmissionConflictError < DeliveryError; end
   class RejectedError < DeliveryError; end
   class UnavailableError < DeliveryError; end
   class RateLimitedError < DeliveryError; end

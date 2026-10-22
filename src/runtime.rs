@@ -4,10 +4,11 @@
 mod tests;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 
+use crate::config::QueuedConfig;
 use crate::control::{Control, Decision, Snapshot};
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -21,6 +22,7 @@ pub enum Component {
 
 #[derive(Clone, Copy)]
 struct Observations {
+    dispatcher: Component,
     feedback: Component,
     synchronization: Component,
     acknowledged: u64,
@@ -31,6 +33,7 @@ struct Observations {
 
 #[derive(Serialize)]
 pub struct Health {
+    pub dispatcher: Component,
     pub version: &'static str,
     pub phase: &'static str,
     pub ready: bool,
@@ -47,6 +50,7 @@ pub struct Health {
 
 pub struct Runtime {
     pub control: Arc<Control>,
+    pub queued: Option<QueuedConfig>,
     active: AtomicUsize,
     observations: Mutex<Observations>,
 }
@@ -60,11 +64,31 @@ impl Drop for RequestPermit {
 }
 
 impl Runtime {
-    pub fn new(control: Arc<Control>, feedback: bool, synchronization: bool) -> Arc<Self> {
+    fn observations(&self) -> MutexGuard<'_, Observations> {
+        self.observations.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Marks a component degraded and bumps its error counter. Shared by
+    /// `feedback_error` and `sync_error`, which differ only in which fields
+    /// of `Observations` they touch.
+    const fn degrade(component: &mut Component, errors: &mut u64) {
+        *component = Component::Degraded;
+        *errors = errors.saturating_add(1);
+    }
+
+    pub fn new(
+        control: Arc<Control>,
+        feedback: bool,
+        synchronization: bool,
+        queued: Option<QueuedConfig>,
+    ) -> Arc<Self> {
+        let dispatcher = if queued.is_some() { Component::Starting } else { Component::Disabled };
         Arc::new(Self {
             control,
+            queued,
             active: AtomicUsize::new(0),
             observations: Mutex::new(Observations {
+                dispatcher,
                 feedback: if feedback { Component::Starting } else { Component::Disabled },
                 synchronization: if synchronization {
                     Component::Starting
@@ -92,7 +116,7 @@ impl Runtime {
     }
 
     pub fn health(&self, storage_ready: bool, provider_circuit: &'static str) -> Health {
-        let observed = *self.observations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let observed = *self.observations();
         let ready = self.control.decide(Snapshot {
             valid: true,
             service_ready: true,
@@ -107,6 +131,7 @@ impl Runtime {
         } else if !ready {
             "starting"
         } else if observed.feedback == Component::Degraded
+            || observed.dispatcher == Component::Degraded
             || observed.synchronization == Component::Degraded
             || provider_circuit == "open"
         {
@@ -115,6 +140,7 @@ impl Runtime {
             "ready"
         };
         Health {
+            dispatcher: observed.dispatcher,
             version: env!("CARGO_PKG_VERSION"),
             phase,
             ready,
@@ -130,27 +156,37 @@ impl Runtime {
         }
     }
 
+    pub fn dispatch_state(&self, healthy: bool) {
+        self.observations().dispatcher =
+            if healthy { Component::Healthy } else { Component::Degraded };
+    }
+
+    pub fn dispatcher_ready(&self, storage_ready: bool, provider_circuit: &str) -> bool {
+        self.queued.is_some()
+            && self.control.ready()
+            && storage_ready
+            && provider_circuit != "open"
+            && self.observations().dispatcher == Component::Healthy
+    }
+
     pub fn feedback_ok(&self) {
-        self.observations.lock().unwrap_or_else(std::sync::PoisonError::into_inner).feedback =
-            Component::Healthy;
+        self.observations().feedback = Component::Healthy;
     }
 
     pub fn feedback_error(&self) {
-        let mut observed =
-            self.observations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        observed.feedback = Component::Degraded;
-        observed.feedback_errors = observed.feedback_errors.saturating_add(1);
+        let mut guard = self.observations();
+        let observed = &mut *guard;
+        Self::degrade(&mut observed.feedback, &mut observed.feedback_errors);
+        drop(guard);
     }
 
     pub fn acknowledged(&self) {
-        let mut observed =
-            self.observations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut observed = self.observations();
         observed.acknowledged = observed.acknowledged.saturating_add(1);
     }
 
     pub fn sync_ok(&self, merged: u64) {
-        let mut observed =
-            self.observations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut observed = self.observations();
         observed.synchronization = Component::Healthy;
         observed.last_sync_merged = Some(merged);
         drop(observed);
@@ -158,9 +194,9 @@ impl Runtime {
     }
 
     pub fn sync_error(&self) {
-        let mut observed =
-            self.observations.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        observed.synchronization = Component::Degraded;
-        observed.sync_errors = observed.sync_errors.saturating_add(1);
+        let mut guard = self.observations();
+        let observed = &mut *guard;
+        Self::degrade(&mut observed.synchronization, &mut observed.sync_errors);
+        drop(guard);
     }
 }

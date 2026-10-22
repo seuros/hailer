@@ -6,9 +6,10 @@
 //! trait and is swapped in the same way — no change to `bay.rs` or `mail.rs`.
 
 pub mod guard;
+pub mod queued;
 pub mod ses;
 
-use async_trait::async_trait;
+use std::future::Future;
 use thiserror::Error;
 
 use crate::mail::SendRequest;
@@ -62,9 +63,14 @@ impl ProviderError {
 
 /// A backend that can hand a fully-rendered raw MIME message to a real mail
 /// transport and report back the transport's message id.
-#[async_trait]
+///
+/// Static dispatch keeps the native future unboxed. The explicit `Send`
+/// contract allows both docking links and supervised workers to spawn it.
 pub trait MailProvider: Send + Sync {
-    async fn send(&self, request: &SendRequest) -> Result<String, ProviderError>;
+    fn send(
+        &self,
+        request: &SendRequest,
+    ) -> impl Future<Output = Result<String, ProviderError>> + Send;
 
     fn circuit_state(&self) -> &'static str {
         "unreported"

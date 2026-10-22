@@ -5,10 +5,10 @@ mod aws;
 mod tests;
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::time::Duration;
 
 use anyhow::ensure;
-use async_trait::async_trait;
 use chrono_machines::Policy;
 use serde::Serialize;
 use sqlx::postgres::PgAdvisoryLock;
@@ -36,13 +36,15 @@ pub enum ReadError {
     InvalidPage,
 }
 
-#[async_trait]
 pub trait Source: Send + Sync {
     fn scope(&self) -> &str;
     fn page_interval(&self) -> Duration {
         Duration::ZERO
     }
-    async fn page(&self, next_token: Option<&str>) -> Result<Page, ReadError>;
+    fn page(
+        &self,
+        next_token: Option<&str>,
+    ) -> impl Future<Output = Result<Page, ReadError>> + Send;
 }
 
 #[derive(Debug, Serialize)]
@@ -52,7 +54,7 @@ pub struct Report {
     pub completed: bool,
 }
 
-pub async fn run(source: &dyn Source, store: &Store, restart: bool) -> anyhow::Result<Report> {
+pub async fn run(source: &impl Source, store: &Store, restart: bool) -> anyhow::Result<Report> {
     ensure!(
         source.scope().len() <= 256 && !source.scope().is_empty(),
         "invalid suppression source scope"
@@ -74,7 +76,7 @@ pub async fn run(source: &dyn Source, store: &Store, restart: bool) -> anyhow::R
     result
 }
 
-async fn run_locked(source: &dyn Source, store: &Store, restart: bool) -> anyhow::Result<Report> {
+async fn run_locked(source: &impl Source, store: &Store, restart: bool) -> anyhow::Result<Report> {
     let mut checkpoint = store.start_sync(source.scope(), restart).await?;
     let mut tokens = HashSet::new();
     if let Some(token) = &checkpoint.next_token {
@@ -105,7 +107,7 @@ async fn run_locked(source: &dyn Source, store: &Store, restart: bool) -> anyhow
     anyhow::bail!("suppression synchronization page limit reached; checkpoint retained")
 }
 
-async fn read_page(source: &dyn Source, token: Option<&str>) -> Result<Page, ReadError> {
+async fn read_page(source: &impl Source, token: Option<&str>) -> Result<Page, ReadError> {
     let policy =
         Policy { max_attempts: 3, base_delay_ms: 1000, multiplier: 2.0, max_delay_ms: 3000 };
     for attempt in 1..=policy.max_attempts {

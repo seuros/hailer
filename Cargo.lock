@@ -33,17 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-trait"
-version = "0.1.92"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
-
-[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1232,7 +1221,6 @@ name = "hailer"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "aws-config",
  "aws-sdk-sesv2",
  "aws-sdk-sqs",
@@ -1248,7 +1236,9 @@ dependencies = [
  "redb",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
+ "state-machines",
  "tempfile",
  "thiserror",
  "throttle-machines",
@@ -2617,6 +2607,7 @@ version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9b6f45e43f20a6eba0d7c03779b53775e0d9b40a452b89e55ea7aae87fa7a14"
 dependencies = [
+ "serde",
  "state-machines-core",
  "state-machines-macro",
 ]
@@ -2736,9 +2727,9 @@ dependencies = [
 
 [[package]]
 name = "throttle-machines"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4e8f0e39063d5125c8fe6c6685bc7de2b3594ce3b3b48a596be9a351979b6da"
+checksum = "7c0a3fd615d10838ecd927b414dfe8b902ffcd7aab7881781dea7682f82005c5"
 
 [[package]]
 name = "time"

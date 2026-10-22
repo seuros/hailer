@@ -27,12 +27,16 @@ const SEND_PATH: &str = "/internal/mail/send";
 const EVENTS_PATH: &str = "/internal/mail/events";
 const HEALTH_PATH: &str = "/internal/mail/health";
 const READY_PATH: &str = "/internal/mail/ready";
+const MESSAGES_PATH: &str = "/internal/mail/messages";
+const LIFECYCLE_PATH: &str = "/internal/mail/messages/events";
+const INTAKE_READY_PATH: &str = "/internal/mail/intake-ready";
+const DISPATCH_READY_PATH: &str = "/internal/mail/dispatch-ready";
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
-pub async fn serve_link<S>(
+pub async fn serve_link<S, P: MailProvider>(
     mut stream: S,
     mut pending: BytesMut,
-    provider: Arc<dyn MailProvider>,
+    provider: Arc<P>,
     store: Store,
     runtime: Arc<Runtime>,
     stop: CancellationToken,
@@ -70,21 +74,100 @@ where
         );
 
         let (status, response_body) = if permit.is_none() {
-            (503, error_body("service draining"))
+            error_reply(503, "service draining")
         } else if method == b"GET"
             && (path == HEALTH_PATH.as_bytes() || path == READY_PATH.as_bytes())
         {
             let health = runtime.health(store.healthy().await, provider.circuit_state());
             let status = if path == READY_PATH.as_bytes() && !health.ready { 503 } else { 200 };
             (status, serde_json::to_vec(&health)?)
+        } else if method == b"GET" && path == DISPATCH_READY_PATH.as_bytes() {
+            let ready = runtime.dispatcher_ready(store.healthy().await, provider.circuit_state());
+            json_response(if ready { 200 } else { 503 }, &serde_json::json!({"ready": ready}))
         } else if method == b"POST" && path == EVENTS_PATH.as_bytes() {
             event_page(&body, &store).await
+        } else if let Some(response) = queued_route(method, path, &body, &store, &runtime).await {
+            response
         } else {
             handle(method, path, &body, &provider).await
         };
         write_reply(&mut stream, request_id, status, &response_body).await?;
         stream.write_all(&encode_ready(request_id)).await?;
     }
+}
+
+async fn queued_route(
+    method: &[u8],
+    path: &[u8],
+    body: &[u8],
+    store: &Store,
+    runtime: &Runtime,
+) -> Option<(u16, Vec<u8>)> {
+    if method == b"GET" && path == INTAKE_READY_PATH.as_bytes() {
+        let ready = if let Some(budget) = &runtime.queued {
+            !runtime.control.draining() && store.intake_ready(budget).await
+        } else {
+            false
+        };
+        return Some(json_response(
+            if ready { 200 } else { 503 },
+            &serde_json::json!({"ready": ready, "enabled": runtime.queued.is_some()}),
+        ));
+    }
+    if method == b"POST" && path == MESSAGES_PATH.as_bytes() {
+        let Some(budget) = &runtime.queued else {
+            return Some(error_reply(503, "durable intake is not configured"));
+        };
+        let Ok(command) = serde_json::from_slice::<crate::outbound::Submission>(body) else {
+            return Some(error_reply(400, "invalid submission JSON"));
+        };
+        return Some(match store.submit(command, budget).await {
+            Ok(receipt) => json_response(202, &receipt),
+            Err(error) => error_reply(error.status(), &error.to_string()),
+        });
+    }
+    if method == b"POST" && path == LIFECYCLE_PATH.as_bytes() {
+        let query = match serde_json::from_slice::<EventQuery>(body) {
+            Ok(query) if (1..=100).contains(&query.limit) && i64::try_from(query.after).is_ok() => {
+                query
+            }
+            _ => return Some(error_reply(400, "invalid lifecycle query")),
+        };
+        return Some(store.message_events(query.after, query.limit).await.map_or_else(
+            |_| error_reply(503, "durable mail state unavailable"),
+            |page| json_response(200, &page),
+        ));
+    }
+    if method == b"GET"
+        && let Some(id) = path.strip_prefix(b"/internal/mail/messages/")
+    {
+        // IDs are server-generated UUIDs. No arbitrary path or query input.
+        if id.len() != 36
+            || !id.iter().enumerate().all(|(index, byte)| {
+                if [8, 13, 18, 23].contains(&index) {
+                    *byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            })
+        {
+            return Some(error_reply(404, "message not found"));
+        }
+        let Ok(id) = std::str::from_utf8(id) else {
+            return Some(error_reply(404, "message not found"));
+        };
+        return Some(match store.message_status(id).await {
+            Ok(Some(status)) => json_response(200, &status),
+            Ok(None) => error_reply(404, "message not found"),
+            Err(_) => error_reply(503, "durable mail state unavailable"),
+        });
+    }
+    None
+}
+
+fn json_response(status: u16, value: &impl serde::Serialize) -> (u16, Vec<u8>) {
+    serde_json::to_vec(value)
+        .map_or_else(|_| error_reply(503, "response serialization failed"), |body| (status, body))
 }
 
 async fn read_body<S: AsyncRead + Unpin>(
@@ -132,13 +215,13 @@ const fn default_page_limit() -> usize {
 async fn event_page(body: &[u8], store: &Store) -> (u16, Vec<u8>) {
     let query: EventQuery = match serde_json::from_slice::<EventQuery>(body) {
         Ok(query) if (1..=100).contains(&query.limit) => query,
-        _ => return (400, error_body("expected after cursor and limit in 1..100")),
+        _ => return error_reply(400, "expected after cursor and limit in 1..100"),
     };
     store.events(query.after, query.limit).await.map_or_else(
-        |_| (503, error_body("feedback state unavailable")),
+        |_| error_reply(503, "feedback state unavailable"),
         |page| {
             serde_json::to_vec(&page).map_or_else(
-                |_| (503, error_body("feedback serialization failed")),
+                |_| error_reply(503, "feedback serialization failed"),
                 |body| (200, body),
             )
         },
@@ -149,19 +232,19 @@ fn param<'a>(params: &'a [(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<&'a [u8]> 
     params.iter().find(|(key, _)| key.as_slice() == name).map(|(_, value)| value.as_slice())
 }
 
-async fn handle(
+async fn handle<P: MailProvider>(
     method: &[u8],
     path: &[u8],
     body: &[u8],
-    provider: &Arc<dyn MailProvider>,
+    provider: &Arc<P>,
 ) -> (u16, Vec<u8>) {
     if method != b"POST" || path != SEND_PATH.as_bytes() {
-        return (404, br#"{"error":"not found"}"#.to_vec());
+        return error_reply(404, "not found");
     }
 
     let request: SendRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
-        Err(error) => return (400, error_body(&error.to_string())),
+        Err(error) => return error_reply(400, &error.to_string()),
     };
 
     match provider.send(&request).await {
@@ -181,6 +264,12 @@ async fn handle(
 fn error_body(message: &str) -> Vec<u8> {
     serde_json::to_vec(&SendErrorBody { error: message.to_string(), code: None })
         .unwrap_or_default()
+}
+
+/// Every route handler's rejection path: a status paired with a
+/// `{"error": message}` body in the shape the Ruby gem understands.
+fn error_reply(status: u16, message: &str) -> (u16, Vec<u8>) {
+    (status, error_body(message))
 }
 
 async fn write_reply<S: AsyncWrite + Unpin>(

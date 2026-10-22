@@ -45,6 +45,9 @@ impl Store {
             "SELECT NOT EXISTS(SELECT 1 FROM hailer.events) \
              AND NOT EXISTS(SELECT 1 FROM hailer.suppressions) \
              AND NOT EXISTS(SELECT 1 FROM hailer.sync_checkpoints) \
+             AND NOT EXISTS(SELECT 1 FROM hailer.messages) \
+             AND (SELECT sequence = 0 AND live_bytes = 0 AND live_messages = 0 \
+                  FROM hailer.outbound_counter WHERE id = 1) \
              AND (SELECT value = 0 FROM hailer.event_counter WHERE id = 1)",
         )
         .fetch_one(&mut *transaction)

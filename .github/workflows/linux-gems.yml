@@ -30,8 +30,8 @@ jobs:
           - runner: ubuntu-24.04-arm
             platform: aarch64-linux-gnu
     runs-on: ${{ matrix.runner }}
-    # Build against glibc 2.36 rather than the host runner's newer libc.
-    container: ruby:4.0-bookworm
+    # Trixie is the deployment baseline (glibc 2.41), not the runner's libc.
+    container: ruby:4.0-trixie
     services:
       postgres:
         image: postgres:18
@@ -47,7 +47,8 @@ jobs:
       CARGO_BUILD_JOBS: "2"
       BUNDLE_FROZEN: "true"
       BUNDLE_PATH: vendor/bundle
-      BUNDLE_FORCE_RUBY_PLATFORM: "true"
+      # Use the locked GNU dependency variants, as the slim runtime does.
+      BUNDLE_FORCE_RUBY_PLATFORM: "false"
       EXPECTED_PLATFORM: ${{ matrix.platform }}
       RELEASE_TAG: ${{ inputs.tag }}
       HAILER_TEST_DATABASE_URL: postgres://hailer:hailer-test@postgres:5432/hailer_test
@@ -103,7 +104,7 @@ jobs:
             platform: aarch64-linux-gnu
     runs-on: ${{ matrix.runner }}
     # Prove the artifact runs without the build image's toolchain/libraries.
-    container: ruby:4.0-slim-bookworm
+    container: ruby:4.0-slim-trixie
     services:
       postgres:
         image: postgres:18
@@ -139,6 +140,13 @@ jobs:
           hailer migrate
           hailer import-suppressions --file test/fixtures/suppressions.json > /tmp/import.json
           ruby -rjson -e 'abort "import failed" unless JSON.parse(File.read("/tmp/import.json")).fetch("imported") == 2'
+          # Also prove this is the durable-dispatch binary and its spool schema,
+          # not an older same-version artifact with only feedback migrations.
+          if hailer message-status --id 00000000-0000-0000-0000-000000000000 > /tmp/status.json 2> /tmp/status.err; then
+            echo "expected an empty message spool"
+            exit 1
+          fi
+          grep -q "message not found" /tmp/status.err
 
   attach:
     if: github.event_name == 'workflow_dispatch'

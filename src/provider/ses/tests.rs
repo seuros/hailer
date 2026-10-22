@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aws_sdk_sesv2::config::{BehaviorVersion, Credentials, Region, SharedCredentialsProvider};
@@ -22,10 +23,25 @@ async fn fixture(
     body: &'static str,
     disconnect: bool,
 ) -> (SesProvider, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let (provider, calls, task, _) = recorded_fixture(status, body, disconnect, None).await;
+    (provider, calls, task)
+}
+
+type Captured = Arc<Mutex<Vec<serde_json::Value>>>;
+type RecordedFixture = (SesProvider, Arc<AtomicUsize>, tokio::task::JoinHandle<()>, Captured);
+
+async fn recorded_fixture(
+    status: u16,
+    body: &'static str,
+    disconnect: bool,
+    configuration_set: Option<&str>,
+) -> RecordedFixture {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("fixture listener");
     let endpoint = format!("http://{}", listener.local_addr().expect("fixture address"));
     let calls = Arc::new(AtomicUsize::new(0));
     let received = calls.clone();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
     let task = tokio::spawn(async move {
         loop {
             let (mut socket, _) = listener.accept().await.expect("fixture accept");
@@ -52,6 +68,11 @@ async fn fixture(
                     }
                 }
             }
+            let end = bytes.windows(4).position(|window| window == b"\r\n\r\n").expect("headers");
+            recorded
+                .lock()
+                .expect("requests")
+                .push(serde_json::from_slice(&bytes[end + 4..]).expect("request JSON"));
             received.fetch_add(1, Ordering::SeqCst);
             if !disconnect {
                 socket.write_all(format!(
@@ -74,7 +95,69 @@ async fn fixture(
         .retry_config(aws_sdk_sesv2::config::retry::RetryConfig::standard().with_max_attempts(3))
         .endpoint_url(endpoint)
         .build();
-    (SesProvider::new(&config), calls, task)
+    (SesProvider::new(&config, configuration_set), calls, task, requests)
+}
+
+fn correlation() -> Correlation {
+    Correlation {
+        hailer_message_id: "a74698dd-ecc2-45ac-a4ce-01abf5524578".into(),
+        attempt_id: "b74698dd-ecc2-45ac-a4ce-01abf5524578".into(),
+    }
+}
+
+#[tokio::test]
+async fn queued_send_carries_attempt_tags_without_sdk_retries() {
+    let (provider, calls, task, requests) = recorded_fixture(
+        200,
+        r#"{"MessageId":"queued-provider-id"}"#,
+        false,
+        Some("hailer-feedback"),
+    )
+    .await;
+    assert_eq!(
+        provider.dispatch(&request(), &correlation()).await,
+        DispatchOutcome::Accepted("queued-provider-id".into())
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let requests = requests.lock().expect("requests").clone();
+    let tags = requests[0]["EmailTags"].as_array().expect("tags");
+    assert_eq!(requests[0]["ConfigurationSetName"], "hailer-feedback");
+    assert_eq!(tags.len(), 2);
+    assert!(tags.contains(
+        &serde_json::json!({"Name": "hailer_message_id", "Value": correlation().hailer_message_id})
+    ));
+    assert!(tags.contains(
+        &serde_json::json!({"Name": "hailer_attempt_id", "Value": correlation().attempt_id})
+    ));
+    task.abort();
+    assert!(task.await.expect_err("fixture stopped").is_cancelled());
+}
+
+#[tokio::test]
+async fn queued_provider_distinguishes_positive_rejections_from_unknown_outcomes() {
+    for (status, body, disconnect, outcome) in [
+        (
+            429,
+            r#"{"__type":"TooManyRequestsException","message":"quota"}"#,
+            false,
+            DispatchOutcome::NotAccepted { code: "provider_throttled", retryable: true },
+        ),
+        (
+            400,
+            r#"{"__type":"MessageRejected","message":"private recipient detail"}"#,
+            false,
+            DispatchOutcome::NotAccepted { code: "provider_rejected", retryable: false },
+        ),
+        (500, r#"{"message":"server error"}"#, false, DispatchOutcome::Unknown),
+        (200, "", true, DispatchOutcome::Unknown),
+        (200, "{}", false, DispatchOutcome::Unknown),
+    ] {
+        let (provider, calls, task) = fixture(status, body, disconnect).await;
+        assert_eq!(provider.dispatch(&request(), &correlation()).await, outcome);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        task.abort();
+        assert!(task.await.expect_err("fixture stopped").is_cancelled());
+    }
 }
 
 #[tokio::test]
