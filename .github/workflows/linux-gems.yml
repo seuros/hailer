@@ -79,12 +79,17 @@ jobs:
             abort "locked dependencies changed" unless parse.call("/tmp/hailer-original.lock") == parse.call("Gemfile.lock")
           '
           bundle install
-      - name: Test and package
+      - name: Verify platform detection
+        run: ruby -Ilib -rhailer/binary -e 'abort "unexpected host" unless Hailer::Binary.platform == ENV.fetch("EXPECTED_PLATFORM")'
+      - name: Test
+        # workflow_dispatch builds an already-tagged release; its push-triggered
+        # CI run already tested that commit. Re-running here only costs time.
+        if: github.event_name != 'workflow_dispatch'
         run: |
-          ruby -Ilib -rhailer/binary -e 'abort "unexpected host" unless Hailer::Binary.platform == ENV.fetch("EXPECTED_PLATFORM")'
           bundle exec rake test
           cargo test --release --locked
-          bundle exec rake native:package
+      - name: Package
+        run: bundle exec rake native:package
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hailer-${{ matrix.platform }}
