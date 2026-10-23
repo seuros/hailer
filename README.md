@@ -16,14 +16,26 @@ ActionMailer → hailer gem → private Mothership route → hailer binary → S
 An **opt-in durable queued adapter** sits alongside the default synchronous
 send path (`[queued]` in `hailer.example.toml`).
 
+## Install
+
+```ruby
+gem "guardship"
+gem "shuttlebay"
+gem "hailer"
+```
+
+Mothership picks up the bay and starts sending mail. Keep using your
+mailers, interceptors, observers, `deliver_now`, and `deliver_later` -
+nothing else about how Rails sends mail changes.
+
+Everything past this point is reference material: protocol internals,
+TOML knobs, and operator commands for people running or debugging the
+service, not required reading to use it.
+
 ## Rails
 
 Requires Ruby 4.0+ and Rails 8.1 or newer within Rails 8.x.
 Rails main (8.2 alpha) is also exercised. Older releases are not supported.
-
-```ruby
-gem "hailer"
-```
 
 The Railtie registers and selects Hailer automatically. Set the private service
 URL in the Rails process's environment:
@@ -49,11 +61,9 @@ when omitted from `hailer_settings`. There is no default host or fallback to SES
 The app can explicitly override the default, for example
 `config.action_mailer.delivery_method = :test` in its test environment.
 
-Keep using your mailers, interceptors, observers, `deliver_now`, and
-`deliver_later`. Rails still owns job scheduling. The adapter sends rendered MIME
-and separate envelope recipients, preserving explicit `smtp_envelope_from` and
-`smtp_envelope_to` overrides. After SES accepts the message, it sets
-`message.header[:ses_message_id]`.
+The adapter sends rendered MIME and separate envelope recipients, preserving
+explicit `smtp_envelope_from` and `smtp_envelope_to` overrides. After SES
+accepts the message, it sets `message.header[:ses_message_id]`.
 
 ## Rust service
 
