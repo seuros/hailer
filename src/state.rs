@@ -2,7 +2,6 @@
 //! with suppression changes before acknowledging SQS.
 
 mod bulk;
-pub mod legacy;
 pub mod sync;
 #[cfg(test)]
 mod tests;

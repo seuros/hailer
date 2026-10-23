@@ -382,7 +382,7 @@ The SES SDK makes **one send attempt**. AWS throttling/transient failures return
 IDs carry the explicit unknown-outcome code. None of these responses authorizes
 an automatic retry of an ambiguous send.
 
-## Status and migration
+## Status
 
 The delivery contract, Hailer-side feedback processing, domain blocklist,
 impossible-address rejection, address verification, the queued/quarantine
@@ -391,35 +391,6 @@ pipeline, and SES account diagnostics are all implemented and shipped.
 `[email_verification]` ship disabled by default - absent config, not
 missing code.
 
-### Upgrade from 0.1 redb
-
-1. Stop all old Hailer processes cleanly. Keep the source file and a backup.
-2. Provision an **empty** Hailer PostgreSQL database and set its URL.
-3. Run `hailer migrate-redb --file /private/path/state.redb`.
-4. Check reported counts, event cursors, and suppression enforcement before
-   starting 0.2. Keep the source backup; do not restart old writers after cutover.
-
-Migration opens redb read-only, checks event/dedup mappings and suppression keys,
-and copies bounded batches in **one destination transaction**. It preserves
-event IDs, sequence values, suppression metadata, and next-cursor continuity.
-It rejects missing/corrupt sources and nonempty targets without wiping anything.
-An unclean redb file may require recovery with the old version against a backup
-before migration. There is no implicit fallback and no dual-write period.
-
-Before switching an existing app:
-
-1. Provision PostgreSQL, run Hailer on a private Mothership bind, check readiness,
-   and verify real SES delivery using a deliberate test.
-2. Add the gem, set `HAILER_URL`, and remove the app's old delivery-method
-   override so Hailer's default takes effect.
-3. Subscribe a dedicated SQS queue before exporting and importing existing
-   suppressions. Let Hailer catch up and verify the event feed.
-4. Keep existing receivers/interceptors until routing, suppression import,
-   and any provider-neutral app history consumer have been verified.
-5. Only then remove the old sender and AWS-specific feedback handling.
-
-No plugin API or provider exactly-once delivery is promised.
-
 ## Development
 
 ```sh
@@ -427,8 +398,6 @@ bundle install
 bundle exec rake
 HAILER_TEST_DATABASE_URL=postgres://test_user:password@127.0.0.1/hailer_test cargo test --locked
 cargo fmt --all -- --check
-gem build hailer.gemspec --output /tmp/hailer.gem
-bundle exec rake native:package
 ```
 
 The Ruby suite exercises real local HTTP exchanges and a booted Rails app.
@@ -453,63 +422,8 @@ It refuses a non-test app database, points the AWS SDK at a loopback fixture,
 and rolls back application-history changes. It does not change the app's
 dependency lockfile or send external mail.
 
-`native:package` builds a locked release and writes
-`pkg/hailer-<version>-<platform>.gem`. Each platform gem contains exactly its host
-binary and a version/platform/SHA-256 manifest. The launcher verifies that
-manifest before `exec`, preserving arguments, exit status, and signal handling.
 `HAILER_BINARY` is an explicit, version-checked source-build override; there is
 no download or PATH fallback.
 
-Build on each supported release host before publishing its artifact. Nothing
-in the packaging task publishes a gem.
-
-## Linux releases and RubyGems
-
-The **Linux binary gems** GitHub Actions workflow builds `x86_64-linux-gnu`
-and `aarch64-linux-gnu` natively against Debian 13 Trixie (glibc 2.41).
-New Trixie-built artifacts target glibc 2.41 or newer, not Bookworm or
-Alpine/musl.
-Local OrbStack verification uses `test/linux/Dockerfile` for each architecture
-and a separate `ruby:4.0-slim-trixie` runtime.
-Use a copied checkout in separate per-architecture Docker work volumes; do not
-reuse the macOS `target/` or Ruby bundle. Run the locked Ruby tests, release Rust
-tests and `native:package` with an isolated PostgreSQL fixture, then install each
-gem in its slim runtime and exercise the launcher, migrations and import CLI.
-When transferring a macOS snapshot, use `COPYFILE_DISABLE=1 tar --no-xattrs`
-so AppleDouble `._*` metadata cannot appear as spurious SQL migrations.
-
-```sh
-gh workflow run linux-gems.yml --repo seuros/hailer -f tag=v<version>
-```
-
-The workflow checks out the requested release tag, runs the Ruby and Rust
-suites against an isolated PostgreSQL 18 service, and installs each binary gem
-in a separate slim Debian container. Pushes/PRs also verify the branch without
-creating a release or publishing anything; only explicit workflow dispatch
-can attach assets to an existing release.
-It verifies the installed platform, bundled-binary manifest, executable version,
-and PostgreSQL suppression import before attaching either Linux gem to the
-existing release. Existing gem assets are never overwritten; `SHA256SUMS` is
-updated to cover all release gems.
-
-Publishing a GitHub release does **not** publish to RubyGems. Like Shuttlebay,
-release assets can be fetched and published with Rake:
-
-```sh
-bundle exec rake gems:fetch
-bundle exec rake gems:push_all
-# Or select an explicit release:
-bundle exec rake 'gems:push_all[v<version>]'
-```
-
-`gems:push_all` fetches fresh assets, checks every archive's SHA-256,
-name/version/platform, and publishes only that verified set. It skips
-already-published platforms only when RubyGems reports the identical archive
-hash, so an interrupted publication can be resumed without replacing artifacts.
-`gems:push` is an alias. No release task rebuilds or silently republishes gems.
-
-RubyGems may require MFA or a suitably scoped API key. Keep credentials out of
-the repository. Publishing makes the packaged Ruby code and binaries public,
-even when the GitHub repository is private. Once published, Bundler selects
-the matching native gem; do not set `force_ruby_platform` in deployment if
-you want the bundled executable.
+Bundler selects the matching native platform gem automatically; do not set
+`force_ruby_platform` in deployment if you want the bundled executable.

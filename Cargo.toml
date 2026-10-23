@@ -37,9 +37,6 @@ aws-config = "1.12"
 # SES feedback arrives through a private SQS queue subscribed to SNS.
 aws-sdk-sqs = "1.114"
 aws-sdk-sts = "1.119"
-
-# Only the explicit offline migration command reads legacy redb files.
-redb = "4.3"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "migrate", "macros"] }
 
 # Optional address-verification middleware (Emailable today; the trait in
