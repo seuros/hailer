@@ -1,8 +1,10 @@
 use super::*;
 
-#[test]
-fn health_reflects_bootstrap_storage_failure_and_drain_without_leaking_data() {
-    let control = Arc::new(Control::new(None, false).expect("control"));
+#[tokio::test]
+async fn health_reflects_bootstrap_storage_failure_and_drain_without_leaking_data() {
+    let database = crate::test_support::database().await;
+    let pool = crate::state::Store::connect(database.url(), 5).await.expect("store").pool;
+    let control = Arc::new(Control::new(pool, None, false).await.expect("control"));
     let runtime = Runtime::new(control, true, true, None, Arc::new(Intel::Disabled), None);
     assert_eq!(runtime.health(true, "closed").phase, "starting");
     runtime.sync_error();
@@ -30,9 +32,11 @@ fn health_reflects_bootstrap_storage_failure_and_drain_without_leaking_data() {
     }
 }
 
-#[test]
-fn dispatcher_readiness_requires_a_live_worker_without_changing_sync_readiness() {
-    let control = Arc::new(Control::new(None, true).expect("control"));
+#[tokio::test]
+async fn dispatcher_readiness_requires_a_live_worker_without_changing_sync_readiness() {
+    let database = crate::test_support::database().await;
+    let pool = crate::state::Store::connect(database.url(), 5).await.expect("store").pool;
+    let control = Arc::new(Control::new(pool, None, true).await.expect("control"));
     let runtime = Runtime::new(
         control,
         false,

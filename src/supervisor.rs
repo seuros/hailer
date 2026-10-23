@@ -82,6 +82,14 @@ pub async fn run<P: QueuedProvider + 'static>(
             async move { crate::feedback::run(&queue, store, &feedback, &runtime, stop).await },
         );
     }
+    if config.rate_limit.as_ref().is_some_and(|rate| rate.discover_from_aws) {
+        tasks.spawn(discover_rate(
+            aws.clone(),
+            runtime.control.clone(),
+            Duration::from_secs(config.rate_limit.as_ref().unwrap().discovery_interval_seconds),
+            stop.clone(),
+        ));
+    }
     if let Some(sync) = config.suppression_sync {
         tasks.spawn(reconcile(
             aws,
@@ -164,6 +172,54 @@ async fn reconcile(
             warn!("AWS suppression reconciliation failed; checkpoint retained");
             Duration::from_millis(backoff.calculate_delay(failures, 0.25))
         };
+        tokio::select! {
+            () = stop.cancelled() => return Ok(()),
+            () = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+async fn discover_rate(
+    aws: aws_config::SdkConfig,
+    control: Arc<Control>,
+    interval: Duration,
+    stop: CancellationToken,
+) -> anyhow::Result<()> {
+    let backoff = Policy {
+        max_attempts: u8::MAX,
+        base_delay_ms: 1000,
+        multiplier: 2.0,
+        max_delay_ms: 30_000,
+    };
+    let client = crate::aws_client::ses_client(
+        &aws,
+        Some((Duration::from_secs(3), Duration::from_secs(20))),
+    );
+    let mut failures = 0u8;
+    loop {
+        let operation = async { client.get_account().send().await };
+        let result = tokio::select! {
+            () = stop.cancelled() => return Ok(()),
+            result = operation => result,
+        };
+        let delay =
+            match result.ok().and_then(|output| output.send_quota).map(|quota| quota.max_send_rate)
+            {
+                Some(rate) if rate > 0.0 => {
+                    failures = 0;
+                    if let Err(error) = control.set_rate(rate).await {
+                        warn!(%error, "could not persist discovered SES send rate");
+                    } else {
+                        info!(recipients_per_second = rate, "discovered SES send rate from AWS");
+                    }
+                    interval
+                }
+                _ => {
+                    failures = failures.saturating_add(1);
+                    warn!("SES account rate discovery failed; keeping the last known rate");
+                    Duration::from_millis(backoff.calculate_delay(failures, 0.25))
+                }
+            };
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
             () = tokio::time::sleep(delay) => {}

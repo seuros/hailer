@@ -199,8 +199,10 @@ fn route_frames(request_id: u32, method: &[u8], path: &[u8], body: &[u8]) -> Vec
 async fn queued_protocol_commits_before_acceptance_without_calling_the_provider() {
     let database = crate::test_support::database().await;
     let store = Store::connect(database.url(), 5).await.expect("store");
+    let control =
+        crate::control::Control::new(store.pool.clone(), None, false).await.expect("control");
     let runtime = Runtime::new(
-        Arc::new(crate::control::Control::new(None, false).expect("control")),
+        Arc::new(control),
         false,
         true,
         Some(crate::config::QueuedConfig {
@@ -266,7 +268,7 @@ async fn queued_protocol_commits_before_acceptance_without_calling_the_provider(
 async fn queued_routes_reject_unconfigured_intake_and_invalid_queries() {
     let database = crate::test_support::database().await;
     let store = Store::connect(database.url(), 5).await.expect("store");
-    let disabled = runtime(true);
+    let disabled = runtime(true, store.pool.clone()).await;
     assert_eq!(
         queued_route(b"POST", MESSAGES_PATH.as_bytes(), b"{}", &store, &disabled)
             .await
@@ -338,9 +340,10 @@ async fn json_reply(
     (status, response)
 }
 
-fn runtime(bootstrapped: bool) -> Arc<Runtime> {
+async fn runtime(bootstrapped: bool, pool: sqlx::PgPool) -> Arc<Runtime> {
+    let control = crate::control::Control::new(pool, None, bootstrapped).await.expect("control");
     Runtime::new(
-        Arc::new(crate::control::Control::new(None, bootstrapped).expect("control")),
+        Arc::new(control),
         false,
         !bootstrapped,
         None,
@@ -360,12 +363,13 @@ async fn chunked_docking_requests_return_acceptance_and_reuse_the_link() {
         let pending = BytesMut::from(request_frames(1).as_slice());
         let database = crate::test_support::database().await;
         let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
+        let link_runtime = runtime(true, store.pool.clone()).await;
         let task = tokio::spawn(serve_link(
             ship,
             pending,
             provider,
             store,
-            runtime(true),
+            link_runtime,
             CancellationToken::new(),
         ));
         let mut replies = BytesMut::new();
@@ -393,8 +397,9 @@ async fn mismatched_body_request_id_closes_the_link_without_sending() {
     mothership.write_all(&frames).await.expect("request");
     let database = crate::test_support::database().await;
     let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
+    let link_runtime = runtime(true, store.pool.clone()).await;
     let error =
-        serve_link(ship, BytesMut::new(), provider, store, runtime(true), CancellationToken::new())
+        serve_link(ship, BytesMut::new(), provider, store, link_runtime, CancellationToken::new())
             .await
             .expect_err("wrong request id");
     assert!(error.to_string().contains("does not match"));
@@ -405,7 +410,7 @@ async fn mismatched_body_request_id_closes_the_link_without_sending() {
 async fn private_health_and_readiness_report_bootstrap_over_the_real_protocol() {
     let database = crate::test_support::database().await;
     let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
-    let runtime = runtime(false);
+    let runtime = runtime(false, store.pool.clone()).await;
     let stop = CancellationToken::new();
     let (mut client, ship) = duplex(16_384);
     let task = tokio::spawn(serve_link(
@@ -457,7 +462,7 @@ impl MailProvider for DelayedProvider {
 async fn cancellation_drains_an_in_flight_send_instead_of_losing_its_response() {
     let database = crate::test_support::database().await;
     let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
-    let runtime = runtime(true);
+    let runtime = runtime(true, store.pool.clone()).await;
     let stop = CancellationToken::new();
     let provider = Arc::new(DelayedProvider {
         started: tokio::sync::Notify::new(),

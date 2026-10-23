@@ -12,10 +12,16 @@ shutdown_timeout_seconds = 30
 [suppression_sync]
 interval_seconds = 3600
 
-# Optional PER-PROCESS budget, not an account-wide SES quota.
+# Optional. Shared across every replica (one Postgres-backed token bucket,
+# not a per-process budget) - a second replica cannot double the admitted rate.
 # [rate_limit]
 # recipients_per_second = 10.0
 # burst = 50
+# Replace recipients_per_second with the SES account's real
+# SendQuota.MaxSendRate, re-checked periodically. recipients_per_second/burst
+# above become just the seed used until the first successful discovery.
+# discover_from_aws = true
+# discovery_interval_seconds = 900
 
 # Durable intake requires explicit logical payload budgets.
 # [queued]

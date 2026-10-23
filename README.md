@@ -240,11 +240,16 @@ the section disables scheduled sync, not existing suppression enforcement.
 ### Control plane
 
 The behavior circuit evaluates **pure admission decisions**: input validity,
-service/storage readiness, suppression, and local rate admission. PostgreSQL,
+service/storage readiness, suppression, and rate admission. PostgreSQL,
 AWS calls, clocks, and token reservations remain owned by the async host.
 The SES circuit breaker counts transient/ambiguous failures, not bad addresses
 or permanent request rejections. An optional `[rate_limit]` budgets envelope
-recipients **per process**, not per account; it does not discover SES quotas.
+recipients through a single shared Postgres-backed token bucket - every
+replica draws down the same account-wide budget, not an independent
+per-process one. `discover_from_aws = true` replaces the configured rate
+with the SES account's real `SendQuota.MaxSendRate`, re-checked
+periodically; a rate-state read/write failure fails closed (denies
+admission) rather than risk exceeding the real AWS quota blind.
 
 Private `GET /internal/mail/health` returns sanitized component states and
 counters. `GET /internal/mail/ready` returns 503 during initial sync or storage

@@ -48,8 +48,8 @@ impl<P: MailProvider> MailProvider for SuppressionGuard<P> {
             group.retain(|address| !normalize(address).is_ok_and(|key| blocked.contains(&key)));
         }
         snapshot.recipients_allowed = filtered.recipients().next().is_some();
-        snapshot.rate_allowed =
-            snapshot.recipients_allowed && self.control.rate_admit(filtered.recipients().count());
+        snapshot.rate_allowed = snapshot.recipients_allowed
+            && self.control.rate_admit(filtered.recipients().count()).await;
         match self.control.decide(snapshot) {
             Decision::Allow => self.inner.send(&filtered).await,
             Decision::Suppressed => Err(ProviderError::Suppressed),

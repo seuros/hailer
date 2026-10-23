@@ -34,11 +34,8 @@ async fn only_suppressed_envelope_recipients_are_removed_and_mime_is_unchanged()
     let store = Store::connect(database.url(), 5).await.expect("state");
     store.record(&hard_bounce("feedback")).await.expect("bounce");
     let sender = Arc::new(FakeSender::default());
-    let guard = SuppressionGuard {
-        inner: sender.clone(),
-        store,
-        control: Arc::new(Control::new(None, true).expect("control")),
-    };
+    let control = Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control"));
+    let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let original = request();
     assert_eq!(guard.send(&original).await.expect("send"), "ses-id");
     let sent = sender.0.lock().expect("requests").clone();
@@ -56,11 +53,8 @@ async fn all_suppressed_recipients_never_reach_the_provider() {
     let store = Store::connect(database.url(), 5).await.expect("state");
     store.record(&hard_bounce("feedback")).await.expect("bounce");
     let sender = Arc::new(FakeSender::default());
-    let guard = SuppressionGuard {
-        inner: sender.clone(),
-        store,
-        control: Arc::new(Control::new(None, true).expect("control")),
-    };
+    let control = Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control"));
+    let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let mut message = request();
     message.cc_addresses.clear();
     assert_matches!(guard.send(&message).await, Err(ProviderError::Suppressed));
@@ -72,11 +66,8 @@ async fn unsuppressed_messages_keep_their_original_envelopes() {
     let database = crate::test_support::database().await;
     let store = Store::connect(database.url(), 5).await.expect("state");
     let sender = Arc::new(FakeSender::default());
-    let guard = SuppressionGuard {
-        inner: sender.clone(),
-        store,
-        control: Arc::new(Control::new(None, true).expect("control")),
-    };
+    let control = Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control"));
+    let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let message = request();
     guard.send(&message).await.expect("send");
     let sent = sender.0.lock().expect("requests").clone();
@@ -92,9 +83,16 @@ async fn bootstrap_drain_storage_loss_and_rate_denials_never_call_the_sender() {
     let sender = Arc::new(FakeSender::default());
     let control = Arc::new(
         Control::new(
-            Some(&crate::config::RateLimitConfig { recipients_per_second: 0.001, burst: 3 }),
+            store.pool.clone(),
+            Some(&crate::config::RateLimitConfig {
+                recipients_per_second: 0.001,
+                burst: 3,
+                discover_from_aws: false,
+                discovery_interval_seconds: 900,
+            }),
             false,
         )
+        .await
         .expect("control"),
     );
     let guard =
@@ -110,7 +108,7 @@ async fn bootstrap_drain_storage_loss_and_rate_denials_never_call_the_sender() {
     let guard = SuppressionGuard {
         inner: sender.clone(),
         store: store.clone(),
-        control: Arc::new(Control::new(None, true).expect("control")),
+        control: Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control")),
     };
     store.pool.close().await;
     assert_matches!(guard.send(&request()).await, Err(ProviderError::Transport(_)));
@@ -123,11 +121,8 @@ async fn invalid_input_is_rejected_before_a_database_lookup() {
     let store = Store::connect(database.url(), 5).await.expect("state");
     store.pool.close().await;
     let sender = Arc::new(FakeSender::default());
-    let guard = SuppressionGuard {
-        inner: sender.clone(),
-        store,
-        control: Arc::new(Control::new(None, true).expect("control")),
-    };
+    let control = Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control"));
+    let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let mut invalid = request();
     invalid.to_addresses = vec!["invalid".into()];
     assert_matches!(guard.send(&invalid).await, Err(ProviderError::InvalidAddress(_)));

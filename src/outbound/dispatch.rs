@@ -109,7 +109,7 @@ impl Store {
             storage_ready: true,
             service_ready: true,
             recipients_allowed: allowed > 0,
-            rate_allowed: allowed > 0 && control.rate_admit(allowed),
+            rate_allowed: allowed > 0 && control.rate_admit(allowed).await,
         });
         let attempt = journal::attempt(&mut tx, &claim.correlation.attempt_id).await?;
         sqlx::query("UPDATE hailer.attempts SET envelope = $1, excluded = $2 WHERE id = $3")

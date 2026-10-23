@@ -249,10 +249,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let control = Arc::new(control::Control::new(
-        config.rate_limit.as_ref(),
-        config.suppression_sync.is_none(),
-    )?);
+    let control = Arc::new(
+        control::Control::new(
+            store.pool.clone(),
+            config.rate_limit.as_ref(),
+            config.suppression_sync.is_none(),
+        )
+        .await?,
+    );
     let provider = Arc::new(SesProvider::new(&aws, config.ses_configuration_set.as_deref()));
     let verifier = Arc::new(build_verifier(config.email_verification.as_ref())?);
     let intel = Arc::new(build_intel(config.domain_intel.as_ref()));

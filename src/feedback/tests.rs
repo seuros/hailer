@@ -195,7 +195,9 @@ async fn shutdown_finishes_the_current_commit_and_ack_but_leaves_the_batch_tail(
         acknowledged: AtomicBool::new(false),
     });
     let runtime = crate::runtime::Runtime::new(
-        Arc::new(crate::control::Control::new(None, true).expect("control")),
+        Arc::new(
+            crate::control::Control::new(store.pool.clone(), None, true).await.expect("control"),
+        ),
         true,
         false,
         None,

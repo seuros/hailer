@@ -115,12 +115,20 @@ pub struct Control {
 }
 
 impl Control {
-    pub fn new(rate: Option<&RateLimitConfig>, bootstrapped: bool) -> anyhow::Result<Self> {
+    pub async fn new(
+        pool: sqlx::PgPool,
+        rate: Option<&RateLimitConfig>,
+        bootstrapped: bool,
+    ) -> anyhow::Result<Self> {
+        let limiter = match rate {
+            Some(config) => Some(Limiter::new(pool, config).await?),
+            None => None,
+        };
         Ok(Self {
             policy: Policy::new()?,
             accepting: AtomicBool::new(true),
             bootstrapped: AtomicBool::new(bootstrapped),
-            limiter: rate.map(Limiter::new),
+            limiter,
         })
     }
 
@@ -145,7 +153,25 @@ impl Control {
         self.policy.decide(snapshot).unwrap_or(Decision::Unavailable)
     }
 
-    pub fn rate_admit(&self, recipients: usize) -> bool {
-        self.ready() && self.limiter.as_ref().is_none_or(|limiter| limiter.admit(recipients))
+    /// A rate-state read/write failure fails closed (not admitted): we would
+    /// rather reject a send than risk exceeding the shared AWS-account
+    /// quota because this replica could not see the real counter.
+    pub async fn rate_admit(&self, recipients: usize) -> bool {
+        if !self.ready() {
+            return false;
+        }
+        let Some(limiter) = self.limiter.as_ref() else { return true };
+        limiter.admit(recipients).await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "rate limiter state unavailable; denying admission");
+            false
+        })
+    }
+
+    /// Called by the AWS-discovery reconcile loop.
+    pub async fn set_rate(&self, recipients_per_second: f64) -> anyhow::Result<()> {
+        match self.limiter.as_ref() {
+            Some(limiter) => limiter.set_rate(recipients_per_second).await,
+            None => Ok(()),
+        }
     }
 }

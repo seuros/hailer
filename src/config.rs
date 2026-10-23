@@ -163,8 +163,20 @@ const fn default_unknown_retention() -> u64 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
+    /// Seed/fallback until the first successful discovery, and the value
+    /// used forever if `discover_from_aws` stays false.
     pub recipients_per_second: f64,
     pub burst: u32,
+    /// Replace `recipients_per_second` with the SES account's real
+    /// `SendQuota.MaxSendRate`, periodically re-checked.
+    #[serde(default)]
+    pub discover_from_aws: bool,
+    #[serde(default = "default_rate_discovery_interval")]
+    pub discovery_interval_seconds: u64,
+}
+
+const fn default_rate_discovery_interval() -> u64 {
+    900
 }
 
 #[derive(Debug, Clone, Deserialize)]

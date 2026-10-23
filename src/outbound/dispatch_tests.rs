@@ -17,13 +17,17 @@ use crate::provider::{MailProvider, ProviderError};
 use crate::runtime::Runtime;
 use crate::state::{Store, Suppression};
 
-fn control() -> Control {
-    Control::new(None, true).expect("control")
+async fn control(pool: sqlx::PgPool) -> Control {
+    Control::new(pool, None, true).await.expect("control")
 }
 
 async fn ticket(store: &Store) -> Ticket {
     let claim = store.claim_message().await.expect("claim").expect("work");
-    store.prepare_dispatch(&claim, &control()).await.expect("prepare").expect("ticket")
+    store
+        .prepare_dispatch(&claim, &control(store.pool.clone()).await)
+        .await
+        .expect("prepare")
+        .expect("ticket")
 }
 
 async fn expire_lease(store: &Store, id: &str) {
@@ -82,8 +86,20 @@ async fn claims_are_exclusive_and_pre_dispatch_worker_loss_is_reclaimable() {
     store.maintain_messages(604_800).await.expect("recover");
     let new = store.claim_message().await.expect("new claim").expect("work");
     assert_ne!(old.correlation.attempt_id, new.correlation.attempt_id);
-    assert!(store.prepare_dispatch(&old, &control()).await.expect("stale fence").is_none());
-    assert!(store.prepare_dispatch(&new, &control()).await.expect("new fence").is_some());
+    assert!(
+        store
+            .prepare_dispatch(&old, &control(store.pool.clone()).await)
+            .await
+            .expect("stale fence")
+            .is_none()
+    );
+    assert!(
+        store
+            .prepare_dispatch(&new, &control(store.pool.clone()).await)
+            .await
+            .expect("new fence")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -171,7 +187,13 @@ async fn all_suppressed_and_expired_queued_work_purge_without_dispatch() {
     block(&store, "to@example.dev").await;
     block(&store, "blind@example.dev").await;
     let claim = store.claim_message().await.expect("claim").expect("work");
-    assert!(store.prepare_dispatch(&claim, &control()).await.expect("suppressed").is_none());
+    assert!(
+        store
+            .prepare_dispatch(&claim, &control(store.pool.clone()).await)
+            .await
+            .expect("suppressed")
+            .is_none()
+    );
     let status =
         store.message_status(&receipt.hailer_message_id).await.expect("status").expect("message");
     assert_eq!(status.status, "suppressed");
@@ -292,7 +314,13 @@ async fn cancellation_is_fenced_and_unknown_retention_never_labels_mail_unsent()
         .expect("accept");
     let claim = store.claim_message().await.expect("claim").expect("work");
     store.cancel_message(&cancelled.hailer_message_id, "business withdrawn").await.expect("cancel");
-    assert!(store.prepare_dispatch(&claim, &control()).await.expect("fenced").is_none());
+    assert!(
+        store
+            .prepare_dispatch(&claim, &control(store.pool.clone()).await)
+            .await
+            .expect("fenced")
+            .is_none()
+    );
     let held = store
         .submit(submission("retain"), &budget(), &Intel::Disabled, None)
         .await
@@ -549,7 +577,10 @@ async fn local_policy_denials_are_safe_and_operator_acceptance_is_audited() {
     let claim = store.claim_message().await.expect("claim").expect("work");
     assert!(
         store
-            .prepare_dispatch(&claim, &Control::new(None, false).expect("unready"))
+            .prepare_dispatch(
+                &claim,
+                &Control::new(store.pool.clone(), None, false).await.expect("unready")
+            )
             .await
             .expect("denied")
             .is_none()
@@ -634,7 +665,7 @@ async fn supervised_worker_drains_one_effect_but_leaves_the_queue_tail_durable()
     sqlx::query("UPDATE hailer.messages SET next_attempt_at = clock_timestamp() + interval '1 hour' WHERE id = $1")
         .bind(&tail.hailer_message_id).execute(&store.pool).await.expect("defer tail");
     let runtime = Runtime::new(
-        Arc::new(control()),
+        Arc::new(control(store.pool.clone()).await),
         false,
         false,
         Some(budget()),
@@ -684,7 +715,7 @@ async fn forced_worker_loss_and_restart_never_repeat_an_uncertain_effect() {
     let receipt =
         store.submit(submission("probe"), &budget(), &Intel::Disabled, None).await.expect("accept");
     let runtime = Runtime::new(
-        Arc::new(control()),
+        Arc::new(control(store.pool.clone()).await),
         false,
         false,
         Some(budget()),
