@@ -34,6 +34,7 @@ mod test_support;
 mod verify;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use provider::ses::SesProvider;
 use tracing::{error, info, warn};
@@ -91,6 +92,10 @@ enum Command {
     BatchStatus(BatchStatusArgs),
     /// Check the Emailable account's owner email and remaining verification credits
     EmailableAccount,
+    /// Check SES account sending quota, reputation, and enforcement status
+    SesAccount,
+    /// Check SES verification status for one or more email identities (domains)
+    SesIdentities(SesIdentitiesArgs),
 }
 
 #[derive(usage_rs::Args, Debug)]
@@ -170,6 +175,13 @@ struct SyncArgs {
     restart: bool,
 }
 
+#[derive(usage_rs::Args, Debug)]
+struct SesIdentitiesArgs {
+    /// Comma-separated email identities (domains) to check
+    #[usage(long)]
+    identities: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -216,6 +228,14 @@ async fn main() -> anyhow::Result<()> {
         let source = suppression_sync::AwsSuppressions::new(&aws).await?;
         let report = suppression_sync::run(&source, &store, restart).await?;
         println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
+    if matches!(args.command, Some(Command::SesAccount)) {
+        print_ses_account().await?;
+        return Ok(());
+    }
+    if let Some(Command::SesIdentities(SesIdentitiesArgs { identities })) = &args.command {
+        print_ses_identities(identities).await?;
         return Ok(());
     }
 
@@ -269,6 +289,57 @@ fn build_intel(config: Option<&DomainIntelConfig>) -> Intel {
         Some(IntelKind::Rdap) => Intel::Rdap(RdapClient::new()),
         None => Intel::Disabled,
     }
+}
+
+/// Prints SES account sending quota, reputation, and enforcement status.
+/// Used by operators to check account health independently of a send.
+async fn print_ses_account() -> anyhow::Result<()> {
+    let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let client =
+        aws_client::ses_client(&aws, Some((Duration::from_secs(3), Duration::from_secs(20))));
+    let resp = client.get_account().send().await?;
+    let quota = resp.send_quota();
+    println!(
+        "{}",
+        serde_json::json!({
+            "dedicated_ip_auto_warmup_enabled": resp.dedicated_ip_auto_warmup_enabled(),
+            "production_access_enabled": resp.production_access_enabled(),
+            "sending_enabled": resp.sending_enabled(),
+            "enforcement_status": resp.enforcement_status(),
+            "max_24_hour_send": quota.map(aws_sdk_sesv2::types::SendQuota::max24_hour_send),
+            "max_send_rate": quota.map(aws_sdk_sesv2::types::SendQuota::max_send_rate),
+            "sent_last_24_hours": quota.map(aws_sdk_sesv2::types::SendQuota::sent_last24_hours),
+        })
+    );
+    Ok(())
+}
+
+/// Prints verification status for each comma-separated identity. A failed
+/// lookup for one identity is reported inline, not fatal to the others.
+async fn print_ses_identities(identities: &str) -> anyhow::Result<()> {
+    let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let client =
+        aws_client::ses_client(&aws, Some((Duration::from_secs(3), Duration::from_secs(20))));
+    let mut results = serde_json::Map::new();
+    for identity in identities.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let value = match client.get_email_identity().email_identity(identity).send().await {
+            Ok(resp) => serde_json::json!({
+                "verified_for_sending_status": resp.verified_for_sending_status(),
+                "verification_status": resp.verification_status().map(aws_sdk_sesv2::types::VerificationStatus::as_str),
+            }),
+            Err(error) => {
+                let service = error.as_service_error();
+                serde_json::json!({
+                    "error": service.and_then(aws_sdk_sesv2::error::ProvideErrorMetadata::message)
+                        .unwrap_or("request failed"),
+                    "code": service.and_then(aws_sdk_sesv2::error::ProvideErrorMetadata::code),
+                })
+            }
+        };
+        results.insert(identity.to_string(), value);
+    }
+    println!("{}", serde_json::Value::Object(results));
+    Ok(())
 }
 
 /// Resolve on SIGTERM or ctrl-c.

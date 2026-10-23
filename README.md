@@ -343,6 +343,21 @@ the Emailable account's remaining credits directly; `submit_batch` itself
 also checks this before submitting and refuses (without ever reaching the
 server) if the account has none left or fewer than the batch needs.
 
+### SES account diagnostics
+
+Operator-only, standalone (no Mothership, no docking - same tier as
+`migrate`/`sync-suppressions`), for checking the AWS side of mail delivery
+without ever sending anything:
+
+```sh
+hailer ses-account                                        # quota, reputation, enforcement status
+hailer ses-identities --identities commonshare.com,insights.commonshare.com
+```
+
+`ses-identities` checks each comma-separated identity independently - one
+unverified or nonexistent identity is reported inline (`error`/`code`) and
+never stops the others from reporting.
+
 ## Failure semantics
 
 An HTTP 200 means **SES accepted the message**, not that the recipient received
