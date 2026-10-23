@@ -7,6 +7,10 @@ CREATE TABLE hailer.outbound_counter (
 );
 INSERT INTO hailer.outbound_counter (id) VALUES (1);
 
+-- 'quarantined' holds a message intake flags for operator review (non-ASCII
+-- domain, or an RDAP new-domain signal) instead of 'queued'. It is
+-- deliberately excluded from messages_dispatch's partial index (status IN
+-- ('queued', 'retry_waiting')).
 CREATE TABLE hailer.messages (
     id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
     submission_key text NOT NULL UNIQUE CHECK (octet_length(submission_key) BETWEEN 1 AND 256),
@@ -17,7 +21,7 @@ CREATE TABLE hailer.messages (
     payload bytea,
     payload_bytes bigint NOT NULL CHECK (payload_bytes > 0),
     status text NOT NULL CHECK (status IN (
-        'queued', 'claimed', 'dispatching', 'retry_waiting', 'held_unknown',
+        'queued', 'claimed', 'dispatching', 'retry_waiting', 'held_unknown', 'quarantined',
         'accepted', 'rejected', 'suppressed', 'cancelled', 'expired'
     )),
     lifecycle jsonb NOT NULL,
@@ -49,12 +53,17 @@ CREATE TABLE hailer.attempts (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     dispatch_started_at timestamptz,
     finished_at timestamptz,
+    lease_until timestamptz,
     provider_message_id text,
     outcome_code text,
     UNIQUE (message_id, ordinal)
 );
 CREATE UNIQUE INDEX attempts_provider_id ON hailer.attempts(provider_message_id)
     WHERE provider_message_id IS NOT NULL;
+CREATE INDEX attempts_unresolved_leases ON hailer.attempts(lease_until)
+    WHERE phase IN ('reserved', 'dispatching');
+-- messages and attempts reference each other; one direction must be added
+-- after both tables exist.
 ALTER TABLE hailer.messages ADD CONSTRAINT messages_current_attempt
     FOREIGN KEY (current_attempt_id) REFERENCES hailer.attempts(id);
 
@@ -70,8 +79,10 @@ CREATE INDEX message_events_message ON hailer.message_events(message_id, sequenc
 CREATE TABLE hailer.recipient_facts (
     event_id text NOT NULL REFERENCES hailer.events(event_id),
     attempt_id text NOT NULL REFERENCES hailer.attempts(id),
+    message_id text NOT NULL REFERENCES hailer.messages(id),
     recipient text NOT NULL,
     kind text NOT NULL,
     occurred_at timestamptz NOT NULL,
     PRIMARY KEY (event_id, attempt_id, recipient, kind)
 );
+CREATE INDEX recipient_facts_message ON hailer.recipient_facts(message_id, occurred_at DESC, event_id);
