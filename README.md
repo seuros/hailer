@@ -14,13 +14,12 @@ ActionMailer → hailer gem → private Mothership route → hailer binary → S
 ```
 
 An **opt-in durable queued adapter** sits alongside the default synchronous
-send path. See [durable delivery](docs/durable-delivery.md) for ownership,
-recovery, routing and operator controls.
+send path (`[queued]` in `hailer.example.toml`).
 
 ## Rails
 
 Requires Ruby 4.0+ and Rails 8.1 or newer within Rails 8.x.
-Rails main (8.2 alpha) is also exercised in CommonShare. Older releases are not supported.
+Rails main (8.2 alpha) is also exercised. Older releases are not supported.
 
 ```ruby
 gem "hailer"
@@ -133,7 +132,7 @@ are left for SQS's dead-letter policy.
 - Transient/undetermined bounces are recorded without permanent suppression.
 - An explicit `not-spam` complaint does not create a new suppression.
 - Suppression checks cover the actual To/Cc/Bcc envelope, including overrides.
-  Matching preserves CommonShare's case/plus-alias policy.
+  Matching is case-insensitive and ignores `+alias` tags.
 - Mixed messages keep allowed recipients and their original addresses; MIME
   is unchanged. If every recipient is suppressed, Hailer returns HTTP 422
   without calling SES. A suppression lookup failure fails closed with HTTP 503.
