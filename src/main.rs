@@ -291,8 +291,6 @@ fn build_intel(config: Option<&DomainIntelConfig>) -> Intel {
     }
 }
 
-/// Prints SES account sending quota, reputation, and enforcement status.
-/// Used by operators to check account health independently of a send.
 async fn print_ses_account() -> anyhow::Result<()> {
     let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let client =
@@ -314,8 +312,6 @@ async fn print_ses_account() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Prints verification status for each comma-separated identity. A failed
-/// lookup for one identity is reported inline, not fatal to the others.
 async fn print_ses_identities(identities: &str) -> anyhow::Result<()> {
     let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let client =

@@ -20,10 +20,6 @@ module HailerPackaging
   module_function
 
   def metadata
-    # Only `cargo metadata`'s own JSON goes to stdout; a cold toolchain
-    # (e.g. a fresh workflow_dispatch runner) can print an unrelated `info:`
-    # notice to stderr on its first invocation. capture2e would merge that
-    # into the JSON and break parsing, so stdout/stderr are kept separate.
     output, error, status = Open3.capture3('cargo', 'metadata', '--no-deps', '--format-version=1', chdir: ROOT)
     raise error unless status.success?
 
