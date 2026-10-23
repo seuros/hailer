@@ -23,7 +23,6 @@ Requires Ruby 4.0+ and Rails 8.1 or newer within Rails 8.x.
 Rails main (8.2 alpha) is also exercised in CommonShare. Older releases are not supported.
 
 ```ruby
-# Gemfile (use path: "/path/to/hailer" while developing)
 gem "hailer"
 ```
 
