@@ -82,11 +82,11 @@ pub async fn run<P: QueuedProvider + 'static>(
             async move { crate::feedback::run(&queue, store, &feedback, &runtime, stop).await },
         );
     }
-    if config.rate_limit.as_ref().is_some_and(|rate| rate.discover_from_aws) {
+    if let Some(rate) = config.rate_limit.as_ref().filter(|rate| rate.discover_from_aws) {
         tasks.spawn(discover_rate(
             aws.clone(),
             runtime.control.clone(),
-            Duration::from_secs(config.rate_limit.as_ref().unwrap().discovery_interval_seconds),
+            Duration::from_secs(rate.discovery_interval_seconds),
             stop.clone(),
         ));
     }
