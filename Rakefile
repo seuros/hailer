@@ -1,10 +1,8 @@
 # frozen_string_literal: true
 
-require 'rake/testtask'
-
-Rake::TestTask.new do |test|
-  test.libs << 'test'
-  test.pattern = 'test/**/*_test.rb'
+desc 'Run the Ruby test suite'
+task :test do
+  sh 'bundle exec padded_cell'
 end
 
 task default: :test

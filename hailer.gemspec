@@ -32,5 +32,6 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'railties', '>= 8.1', '< 9'
 
   spec.add_development_dependency 'minitest', '~> 6.0'
+  spec.add_development_dependency 'padded_cell'
   spec.add_development_dependency 'rake', '~> 13.0'
 end

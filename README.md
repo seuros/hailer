@@ -417,19 +417,6 @@ each test creates and drops its own database. Never point this variable at a
 customer or Rails production database. Neither suite sends real mail or requires
 AWS credentials.
 
-For the opt-in CommonShare compatibility smoke, create a disposable Hailer
-database, then run from that application's checkout:
-
-```sh
-RAILS_ENV=test HAILER_SMOKE_BINARY=/path/to/hailer/target/debug/hailer \
-  HAILER_DATABASE_URL=postgres://test_user:password@127.0.0.1/hailer_smoke \
-  bundle exec rails runner /path/to/hailer/test/commonshare_smoke.rb
-```
-
-It refuses a non-test app database, points the AWS SDK at a loopback fixture,
-and rolls back application-history changes. It does not change the app's
-dependency lockfile or send external mail.
-
 `HAILER_BINARY` is an explicit, version-checked source-build override; there is
 no download or PATH fallback.
 
