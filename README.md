@@ -9,8 +9,12 @@ This repository is two things:
 - **`hailer` crate** — a standalone Rust mail ship, supervised by Mothership.
   SESv2 is the first provider.
 
-```text
-ActionMailer → hailer gem → private Mothership route → hailer binary → SES
+```mermaid
+flowchart LR
+    A[ActionMailer] --> B[hailer gem]
+    B --> C[private Mothership route]
+    C --> D[hailer binary]
+    D --> E[SES]
 ```
 
 An **opt-in durable queued adapter** sits alongside the default synchronous
@@ -129,8 +133,12 @@ shutdown timeout. PostgreSQL 18 is exercised locally and in CI.
 
 ## Bounces, complaints, and suppressions
 
-```text
-SES → SNS → dedicated SQS queue → Hailer → durable events + suppressions
+```mermaid
+flowchart LR
+    A[SES] --> B[SNS]
+    B --> C[dedicated SQS queue]
+    C --> D[Hailer]
+    D --> E[durable events + suppressions]
 ```
 
 Hailer atomically commits each event, deduplication key, and suppression change
@@ -267,8 +275,13 @@ turn off.
 
 ## Domain blocklist
 
-```text
-SendRequest -> impossible-address check -> domain blocklist (free, local) -> suppression (free, local) -> verification (paid, external) -> SES
+```mermaid
+flowchart LR
+    A[SendRequest] --> B[impossible-address check]
+    B --> C["domain blocklist<br/>(free, local)"]
+    C --> D["suppression<br/>(free, local)"]
+    D --> E["verification<br/>(paid, external)"]
+    E --> F[SES]
 ```
 
 Always active - an empty `hailer.domain_blocks` table is a no-op, there is
@@ -289,8 +302,11 @@ cannot be removed this way, by design.
 
 ## Address verification
 
-```text
-SendRequest -> suppression check (cheap, local) -> address verification (paid, external) -> SES
+```mermaid
+flowchart LR
+    A[SendRequest] --> B["suppression check<br/>(cheap, local)"]
+    B --> C["address verification<br/>(paid, external)"]
+    C --> D[SES]
 ```
 
 Opt-in pre-send deliverability check, off by default. Enable with
