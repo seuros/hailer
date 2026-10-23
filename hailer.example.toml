@@ -17,8 +17,7 @@ interval_seconds = 3600
 # recipients_per_second = 10.0
 # burst = 50
 
-# In development: durable intake requires explicit logical payload budgets.
-# Requires the durable-dispatch build, not the existing 0.2 release candidates.
+# Durable intake requires explicit logical payload budgets.
 # [queued]
 # max_bytes = 268435456
 # max_messages = 10000

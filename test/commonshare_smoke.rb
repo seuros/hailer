@@ -191,7 +191,7 @@ begin
   end
   smoke_assert(Hailer::FeedbackClient.new(endpoint: endpoint).poll(after: 0).events.empty?, 'feedback contract')
   health = JSON.parse(Net::HTTP.new('127.0.0.1', port, nil).get('/internal/mail/health').body)
-  smoke_assert(health.fetch('version') == '0.2.0' && health.fetch('ready'), 'controller health')
+  smoke_assert(health.fetch('version') == Hailer::VERSION && health.fetch('ready'), 'controller health')
   smoke_assert(fixture.alive?, 'loopback fixture failed')
   puts "CommonShare #{queued ? 'queued' : 'sync'} smoke passed: Rails #{Rails.version}, Ruby #{RUBY_VERSION}, client #{Hailer::VERSION} (#{Gem.loaded_specs.fetch('hailer').platform}), service #{health.fetch('version')}; no external mail."
 rescue StandardError

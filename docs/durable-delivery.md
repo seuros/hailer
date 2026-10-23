@@ -1,11 +1,8 @@
-# Durable delivery (in development)
+# Durable delivery
 
 The queued Ruby interface, PostgreSQL spool and supervised dispatcher are
-implemented. CommonShare source-client and installed macOS binary-gem smoke
-tests pass. ARM64 and x86_64 Linux release tests, binary packaging and clean slim
-Trixie runtime checks also pass in OrbStack (x86_64 under emulation).
-Do not enable queued delivery against the existing 0.2 release
-candidates or treat this working tree as a published durable-delivery release.
+implemented and shipped (0.3.0+). It is opt-in: absent `[queued]` config,
+Hailer stays on the synchronous send path and none of this runs.
 
 ## Opt-in Rails configuration
 

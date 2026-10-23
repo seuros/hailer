@@ -2,7 +2,7 @@
 
 Rails writes the email. Hailer deals with sending it.
 
-This repository prepares two things at version **0.2.0** (not published yet):
+This repository is two things:
 
 - **`hailer` gem** — an ActionMailer adapter, feedback client, and executable
   launcher. Platform gems bundle the Rust binary. No Ruby AWS SDK or native extension.
@@ -13,11 +13,9 @@ This repository prepares two things at version **0.2.0** (not published yet):
 ActionMailer → hailer gem → private Mothership route → hailer binary → SES
 ```
 
-The working tree also implements an **opt-in durable queued adapter**. See
-[durable delivery](docs/durable-delivery.md) for ownership, recovery, routing
-and operator controls. It is not included in the preserved 0.2 release
-candidates. Current-source macOS, ARM64 Linux and x86_64 Linux verification
-gates pass locally; this work has not been published or deployed.
+An **opt-in durable queued adapter** sits alongside the default synchronous
+send path. See [durable delivery](docs/durable-delivery.md) for ownership,
+recovery, routing and operator controls.
 
 ## Rails
 
@@ -98,7 +96,7 @@ SES account/identities must be configured for sending.
 
 ### PostgreSQL
 
-PostgreSQL is the **only live backend** in 0.2. Hailer owns a `hailer` schema,
+PostgreSQL is the **only live backend**. Hailer owns a `hailer` schema,
 not Rails tables. Use a separate database/role where practical:
 
 ```sh
@@ -386,8 +384,12 @@ an automatic retry of an ambiguous send.
 
 ## Status and migration
 
-The delivery contract and Hailer-side feedback processing are implemented. CommonShare's
-existing sender is the compatibility reference, not a runtime dependency.
+The delivery contract, Hailer-side feedback processing, domain blocklist,
+impossible-address rejection, address verification, the queued/quarantine
+pipeline, and SES account diagnostics are all implemented and shipped.
+`[queued]`, `[domain_intel]`, `[suppression_sync]`, `[feedback]`, and
+`[email_verification]` ship disabled by default - absent config, not
+missing code.
 
 ### Upgrade from 0.1 redb
 
@@ -416,17 +418,7 @@ Before switching an existing app:
    and any provider-neutral app history consumer have been verified.
 5. Only then remove the old sender and AWS-specific feedback handling.
 
-CommonShare's local 0.2 integration is tested with its real application,
-test database, Mothership, the optimized binary from the macOS gem, its installed 0.1 Ruby
-client, and a loopback SES fixture. Its existing AWS
-receivers remain until the real subscription and suppression cutover is verified.
-No deployed AWS routing has been changed.
-The current-source queued adapter and dispatcher also pass a CommonShare smoke
-using an isolated Bundler Gemfile, real Mothership and loopback SES. No app
-Gemfile or production configuration was changed. Its legacy history observer
-still needs queued-ownership semantics before opt-in deployment.
-Validation/behavior plugins and distributed account-wide quotas remain later
-work. No plugin API or provider exactly-once delivery is promised.
+No plugin API or provider exactly-once delivery is promised.
 
 ## Development
 
@@ -435,7 +427,7 @@ bundle install
 bundle exec rake
 HAILER_TEST_DATABASE_URL=postgres://test_user:password@127.0.0.1/hailer_test cargo test --locked
 cargo fmt --all -- --check
-gem build hailer.gemspec --output /tmp/hailer-0.2.0.gem
+gem build hailer.gemspec --output /tmp/hailer.gem
 bundle exec rake native:package
 ```
 
@@ -462,7 +454,7 @@ and rolls back application-history changes. It does not change the app's
 dependency lockfile or send external mail.
 
 `native:package` builds a locked release and writes
-`pkg/hailer-0.2.0-<platform>.gem`. Each platform gem contains exactly its host
+`pkg/hailer-<version>-<platform>.gem`. Each platform gem contains exactly its host
 binary and a version/platform/SHA-256 manifest. The launcher verifies that
 manifest before `exec`, preserving arguments, exit status, and signal handling.
 `HAILER_BINARY` is an explicit, version-checked source-build override; there is
@@ -476,7 +468,7 @@ in the packaging task publishes a gem.
 The **Linux binary gems** GitHub Actions workflow builds `x86_64-linux-gnu`
 and `aarch64-linux-gnu` natively against Debian 13 Trixie (glibc 2.41).
 New Trixie-built artifacts target glibc 2.41 or newer, not Bookworm or
-Alpine/musl. The preserved older 0.2 candidates retain their original baseline.
+Alpine/musl.
 Local OrbStack verification uses `test/linux/Dockerfile` for each architecture
 and a separate `ruby:4.0-slim-trixie` runtime.
 Use a copied checkout in separate per-architecture Docker work volumes; do not
@@ -487,7 +479,7 @@ When transferring a macOS snapshot, use `COPYFILE_DISABLE=1 tar --no-xattrs`
 so AppleDouble `._*` metadata cannot appear as spurious SQL migrations.
 
 ```sh
-gh workflow run linux-gems.yml --repo seuros/hailer -f tag=v0.2.0
+gh workflow run linux-gems.yml --repo seuros/hailer -f tag=v<version>
 ```
 
 The workflow checks out the requested release tag, runs the Ruby and Rust
@@ -507,7 +499,7 @@ release assets can be fetched and published with Rake:
 bundle exec rake gems:fetch
 bundle exec rake gems:push_all
 # Or select an explicit release:
-bundle exec rake 'gems:push_all[v0.2.0]'
+bundle exec rake 'gems:push_all[v<version>]'
 ```
 
 `gems:push_all` fetches fresh assets, checks every archive's SHA-256,
