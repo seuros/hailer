@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- `AWS_ENDPOINT_URL`, and `AWS_ENDPOINT_URL_SESV2`/`_SQS`/`_STS` before it, replace the AWS hosts again, as they did under the AWS SDK; `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true` turns them off. 0.7.0 ignored them, so LocalStack and endpoint fixtures reached real AWS.
+
 ## 0.7.0
 
 - Postmark provider (`provider = "postmark"`, `[postmark] message_stream`, `POSTMARK_SERVER_TOKEN`): Rails MIME parsed into Postmark's JSON, sync and queued sends, correlation as Metadata, `hailer postmark-server` token check. SES-only settings are refused with it.
