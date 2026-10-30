@@ -6,7 +6,7 @@ use crate::provider::test_support::endpoint;
 /// Settings on top of static keys, and the region or error they lead to.
 type Case<'a> = (&'a [(&'a str, &'a str)], Result<&'a str, &'a str>);
 
-fn aws(url: String, token: Option<&str>) -> Aws {
+fn aws(url: &str, token: Option<&str>) -> Aws {
     Aws::fixed(
         url,
         "eu-west-1",
@@ -17,7 +17,7 @@ fn aws(url: String, token: Option<&str>) -> Aws {
 #[tokio::test]
 async fn calls_are_signed_for_their_service_and_region() {
     let server = endpoint(200, r#"{"SuppressedDestinationSummaries":[]}"#, false).await;
-    let aws = aws(server.url.clone(), Some("session-token"));
+    let aws = aws(&server.url, Some("session-token"));
     let response = ses::suppressed_destinations(&aws, Some("next+token/=")).await.expect("answer");
     assert!(response.is_success());
     let headers = server.requests()[0].headers.clone();
@@ -85,7 +85,7 @@ async fn sqs_speaks_the_json_protocol() {
     let server =
         endpoint(200, r#"{"Messages":[{"ReceiptHandle":"r-1","Body":"notification"}]}"#, false)
             .await;
-    let aws = aws(server.url.clone(), None);
+    let aws = aws(&server.url, None);
     let queue = "https://sqs.eu-west-1.amazonaws.com/123456789012/feedback";
     let messages = sqs::receive(&aws, queue).await.expect("messages");
     assert_eq!(messages[0].receipt_handle.as_deref(), Some("r-1"));
@@ -118,7 +118,7 @@ async fn sts_reads_the_account_from_xml() {
         false,
     )
     .await;
-    let aws = aws(server.url.clone(), None);
+    let aws = aws(&server.url, None);
     assert_eq!(sts::account(&aws).await.expect("account"), "123456789012");
     assert_eq!(server.requests()[0].body, "Action=GetCallerIdentity&Version=2011-06-15");
     server.stop().await;
@@ -130,13 +130,13 @@ async fn a_refused_connection_is_not_sent_and_a_dropped_answer_is_lost() {
     let url = format!("http://{}", closed.local_addr().expect("address"));
     drop(closed);
     assert_matches!(
-        ses::send_email(&aws(url, None), b"{}".to_vec()).await,
+        ses::send_email(&aws(&url, None), b"{}".to_vec()).await,
         Err(CallError::NotSent(_))
     );
 
     let server = endpoint(200, "", true).await;
     assert_matches!(
-        ses::send_email(&aws(server.url.clone(), None), b"{}".to_vec()).await,
+        ses::send_email(&aws(&server.url, None), b"{}".to_vec()).await,
         Err(CallError::Lost)
     );
     server.stop().await;
@@ -170,4 +170,37 @@ async fn the_region_comes_from_the_environment_then_the_profile() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn configured_endpoint_urls_replace_the_aws_hosts() {
+    let server = endpoint(200, r#"{"MessageId":"m-1"}"#, false).await;
+    let keys =
+        [("AWS_ACCESS_KEY_ID", "a"), ("AWS_SECRET_ACCESS_KEY", "b"), ("AWS_REGION", "us-east-1")];
+    let load = async |settings: &[(&str, &str)]| {
+        let pairs: Vec<(&str, &str)> = keys.iter().chain(settings.iter()).copied().collect();
+        Aws::from_env(&Env::fixed(&pairs)).await.expect("loaded")
+    };
+
+    let global = format!("{}/", server.url);
+    let aws = load(&[("AWS_ENDPOINT_URL", global.as_str())]).await;
+    let response = ses::send_email(&aws, b"{}".to_vec()).await.expect("answer");
+    assert!(response.is_success());
+    let headers = server.requests()[0].headers.clone();
+    assert!(headers.starts_with("POST /v2/email/outbound-emails HTTP/1.1"), "{headers}");
+
+    let aws =
+        load(&[("AWS_ENDPOINT_URL", "http://global:1"), ("AWS_ENDPOINT_URL_SQS", "http://sqs:2")])
+            .await;
+    assert_eq!(aws.base("sqs"), "http://sqs:2");
+    assert_eq!(aws.base("email"), "http://global:1");
+
+    let aws = load(&[
+        ("AWS_ENDPOINT_URL", "http://global:1"),
+        ("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "TRUE"),
+    ])
+    .await;
+    assert_eq!(aws.base("email"), "https://email.us-east-1.amazonaws.com");
+    assert_eq!(load(&[]).await.base("sts"), "https://sts.us-east-1.amazonaws.com");
+    server.stop().await;
 }

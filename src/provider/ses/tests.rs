@@ -10,7 +10,7 @@ use std::assert_matches;
 fn provider(server: &Endpoint, configuration_set: Option<&str>) -> SesProvider {
     let credentials =
         Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", None);
-    let aws = Aws::fixed(server.url.clone(), "us-east-1", credentials);
+    let aws = Aws::fixed(&server.url, "us-east-1", credentials);
     SesProvider::new(Arc::new(aws), configuration_set)
 }
 

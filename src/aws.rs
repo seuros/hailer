@@ -147,12 +147,34 @@ pub struct Call {
     pub timeout: Duration,
 }
 
+/// Each endpoint host prefix and the service id its `AWS_ENDPOINT_URL_<ID>` names.
+const SERVICE_IDS: [(&str, &str); 3] = [("email", "SESV2"), ("sqs", "SQS"), ("sts", "STS")];
+
 pub struct Aws {
     http: DefaultHttpWebClient,
     region: String,
-    /// Replaces `https://{prefix}.{region}.amazonaws.com` for every service.
-    endpoint: Option<String>,
+    /// Per host prefix, replaces `https://{prefix}.{region}.amazonaws.com`.
+    endpoints: Vec<(&'static str, String)>,
     credentials: Provider,
+}
+
+/// `AWS_ENDPOINT_URL_<ID>`, else `AWS_ENDPOINT_URL`, unless
+/// `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS` is true: the SDKs' precedence.
+fn configured_endpoints(env: &Env) -> Vec<(&'static str, String)> {
+    if env
+        .get("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS")
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    {
+        return Vec::new();
+    }
+    let global = env.get("AWS_ENDPOINT_URL");
+    SERVICE_IDS
+        .iter()
+        .filter_map(|(prefix, id)| {
+            let url = env.get(&format!("AWS_ENDPOINT_URL_{id}")).or_else(|| global.clone())?;
+            Some((*prefix, url.trim_end_matches('/').to_owned()))
+        })
+        .collect()
 }
 
 impl std::fmt::Debug for Aws {
@@ -185,15 +207,23 @@ impl Aws {
         {
             return Err(AwsError::InvalidRegion(region));
         }
-        Ok(Self { http, region, endpoint: None, credentials: Provider::new(source) })
+        Ok(Self {
+            http,
+            region,
+            endpoints: configured_endpoints(env),
+            credentials: Provider::new(source),
+        })
     }
 
     #[cfg(test)]
-    pub fn fixed(endpoint: String, region: &str, credentials: Credentials) -> Self {
+    pub fn fixed(endpoint: &str, region: &str, credentials: Credentials) -> Self {
         Self {
             http: DefaultHttpWebClient::default(),
             region: region.to_owned(),
-            endpoint: Some(endpoint),
+            endpoints: SERVICE_IDS
+                .iter()
+                .map(|(prefix, _)| (*prefix, endpoint.to_owned()))
+                .collect(),
             credentials: Provider::new(Source::Static(credentials)),
         }
     }
@@ -203,8 +233,9 @@ impl Aws {
     }
 
     fn base(&self, prefix: &str) -> String {
-        self.endpoint
-            .clone()
+        self.endpoints
+            .iter()
+            .find_map(|(service, url)| (*service == prefix).then(|| url.clone()))
             .unwrap_or_else(|| format!("https://{prefix}.{}.amazonaws.com", self.region))
     }
 

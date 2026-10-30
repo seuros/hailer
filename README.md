@@ -122,6 +122,9 @@ and `~/.aws/config` files (`AWS_PROFILE`, static keys); an EKS web identity
 container role; the EC2 instance role over IMDSv2. A profile that needs SSO,
 `credential_process` or role chaining is refused with the key it uses. The
 region comes from `AWS_REGION`, `AWS_DEFAULT_REGION`, the profile, or IMDS.
+`AWS_ENDPOINT_URL_SESV2`, `_SQS` and `_STS`, else `AWS_ENDPOINT_URL`, point
+those calls elsewhere (LocalStack, a test fixture) unless
+`AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true`.
 Its identity needs `ses:SendEmail`, and the SES account/identities must be
 configured for sending.
 
