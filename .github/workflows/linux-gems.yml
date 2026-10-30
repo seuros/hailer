@@ -87,7 +87,9 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         run: |
           bundle exec rake test
-          cargo test --release --locked
+          cargo test --release --locked --features ses,postmark
+          cargo check --locked --features ses
+          cargo check --locked --features postmark
       - name: Package
         run: bundle exec rake native:package
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

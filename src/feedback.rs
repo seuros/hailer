@@ -1,14 +1,16 @@
 //! SES feedback is consumed over authenticated SQS, not a public SNS webhook.
 
 mod event;
+#[cfg(feature = "ses")]
 mod queue;
 
 #[cfg(test)]
 pub mod test_support;
-#[cfg(test)]
+#[cfg(all(test, feature = "ses"))]
 mod tests;
 
 pub use event::FeedbackEvent;
+#[cfg(feature = "ses")]
 pub use queue::{AwsQueue, run};
 
 use serde::{Deserialize, Serialize};

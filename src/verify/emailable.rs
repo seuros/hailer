@@ -2,8 +2,15 @@
 //! the async batch endpoints for bulk pre-screening a list before a send,
 //! not the real-time send path. <https://emailable.com/docs/api/emails/>
 
+#[cfg(test)]
+mod tests;
+
 use std::time::Duration;
 
+use rama::http::BodyExtractExt;
+use rama::http::client::DefaultHttpWebClient;
+use rama::http::service::client::HttpClientExt;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
 use super::{State, Verdict, VerifyError};
@@ -29,7 +36,7 @@ const DEFAULT_ACCOUNT_URL: &str = "https://api.emailable.com/v1/account";
 const MAX_INLINE_BATCH_SIZE: usize = 1000;
 
 pub struct EmailableClient {
-    http: reqwest::Client,
+    http: DefaultHttpWebClient,
     base_url: String,
     batch_url: String,
     account_url: String,
@@ -158,12 +165,7 @@ impl EmailableClient {
         account_url: String,
     ) -> Self {
         Self {
-            // A couple of seconds of local headroom over Emailable's own
-            // `timeout` query param, so our own client times out second.
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(u64::from(timeout_seconds) + 3))
-                .build()
-                .expect("static reqwest client config"),
+            http: DefaultHttpWebClient::default(),
             base_url,
             batch_url,
             account_url,
@@ -172,36 +174,46 @@ impl EmailableClient {
         }
     }
 
+    /// A couple of seconds of local headroom over Emailable's own `timeout`
+    /// query param, so our own client times out second.
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(u64::from(self.timeout_seconds) + 3)
+    }
+
+    /// `GET url?query`. The API key rides in the query, so a transport
+    /// error is reported without the URL.
+    async fn get(
+        &self,
+        url: &str,
+        query: &[(&str, &str)],
+    ) -> Result<rama::http::Response, VerifyError> {
+        self.http
+            .get(format!("{url}?{}", encode_query(query)))
+            .send_with_timeout(self.timeout())
+            .await
+            .map_err(|_| VerifyError::Transport("emailable request failed".into()))
+    }
+
     /// `GET /v1/account` - owner email and remaining credits.
     pub async fn account(&self) -> Result<Account, VerifyError> {
-        let response = self
-            .http
-            .get(&self.account_url)
-            .query(&[("api_key", self.api_key.as_str())])
-            .send()
-            .await
-            .map_err(|error| VerifyError::Transport(error.to_string()))?;
+        let response = self.get(&self.account_url, &[("api_key", self.api_key.as_str())]).await?;
         if !response.status().is_success() {
             return Err(VerifyError::Transport(format!(
                 "emailable account lookup returned HTTP {}",
                 response.status()
             )));
         }
-        response.json().await.map_err(|error| VerifyError::InvalidResponse(error.to_string()))
+        json(response).await
     }
 
     pub async fn verify(&self, address: &str) -> Result<Verdict, VerifyError> {
+        let timeout = self.timeout_seconds.to_string();
         let response = self
-            .http
-            .get(&self.base_url)
-            .query(&[
-                ("email", address),
-                ("api_key", self.api_key.as_str()),
-                ("timeout", &self.timeout_seconds.to_string()),
-            ])
-            .send()
-            .await
-            .map_err(|error| VerifyError::Transport(error.to_string()))?;
+            .get(
+                &self.base_url,
+                &[("email", address), ("api_key", self.api_key.as_str()), ("timeout", &timeout)],
+            )
+            .await?;
         // Emailable's own "exceeded timeout, retry within 5 minutes" status.
         // Treated as a transport failure: the caller's policy decides
         // whether that means fail-open (Unknown) or fail-closed.
@@ -214,10 +226,7 @@ impl EmailableClient {
                 response.status()
             )));
         }
-        let body: VerifyResponse = response
-            .json()
-            .await
-            .map_err(|error| VerifyError::InvalidResponse(error.to_string()))?;
+        let body: VerifyResponse = json(response).await?;
         Ok(Verdict {
             state: State::parse(&body.state),
             reason: body.reason,
@@ -253,19 +262,16 @@ impl EmailableClient {
             .http
             .post(&self.batch_url)
             .json(&serde_json::json!({"emails": addresses, "api_key": self.api_key}))
-            .send()
+            .send_with_timeout(self.timeout())
             .await
-            .map_err(|error| VerifyError::Transport(error.to_string()))?;
+            .map_err(|_| VerifyError::Transport("emailable request failed".into()))?;
         if !response.status().is_success() {
             return Err(VerifyError::Transport(format!(
                 "emailable batch submission returned HTTP {}",
                 response.status()
             )));
         }
-        let body: BatchSubmitResponse = response
-            .json()
-            .await
-            .map_err(|error| VerifyError::InvalidResponse(error.to_string()))?;
+        let body: BatchSubmitResponse = json(response).await?;
         Ok(body.id)
     }
 
@@ -273,23 +279,15 @@ impl EmailableClient {
     /// once Emailable's own "Batch verification completed" state is reached
     /// - until then this reports [`BatchStatus::Processing`].
     pub async fn batch_status(&self, id: &str) -> Result<BatchStatus, VerifyError> {
-        let response = self
-            .http
-            .get(&self.batch_url)
-            .query(&[("id", id), ("api_key", self.api_key.as_str())])
-            .send()
-            .await
-            .map_err(|error| VerifyError::Transport(error.to_string()))?;
+        let response =
+            self.get(&self.batch_url, &[("id", id), ("api_key", self.api_key.as_str())]).await?;
         if !response.status().is_success() {
             return Err(VerifyError::Transport(format!(
                 "emailable batch status returned HTTP {}",
                 response.status()
             )));
         }
-        let body: BatchStatusResponse = response
-            .json()
-            .await
-            .map_err(|error| VerifyError::InvalidResponse(error.to_string()))?;
+        let body: BatchStatusResponse = json(response).await?;
         let (processed, total) = body.progress();
         if let Some(emails) = body.emails {
             let verdicts = emails
@@ -313,4 +311,31 @@ impl EmailableClient {
         }
         Ok(BatchStatus::Processing { processed, total })
     }
+}
+
+async fn json<T: DeserializeOwned + Send + 'static>(
+    response: rama::http::Response,
+) -> Result<T, VerifyError> {
+    response.try_into_json().await.map_err(|error| VerifyError::InvalidResponse(error.to_string()))
+}
+
+/// `application/x-www-form-urlencoded` pairs: an address's `+` must not
+/// arrive as a space.
+fn encode_query(pairs: &[(&str, &str)]) -> String {
+    let encode = |value: &str| {
+        value
+            .bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    char::from(byte).to_string()
+                }
+                _ => format!("%{byte:02X}"),
+            })
+            .collect::<String>()
+    };
+    pairs
+        .iter()
+        .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
+        .collect::<Vec<_>>()
+        .join("&")
 }

@@ -2,6 +2,9 @@
 
 ## Working tree — durable delivery (unreleased)
 
+- Providers are cargo features: `ses` (AWS SDK) and `postmark`; platform gems build with both. A binary without the configured provider refuses to start.
+- HTTP clients (Postmark, Emailable, RDAP) moved from reqwest to rama, on the AWS SDK's aws-lc-rs provider.
+
 - Postmark provider (`provider = "postmark"`, `[postmark] message_stream`, `POSTMARK_SERVER_TOKEN`): Rails MIME parsed into Postmark's JSON, sync and queued sends, correlation as Metadata, `hailer postmark-server` token check. SES-only settings are refused with it.
 
 - Opt-in `:hailer_queued` Rails adapter with stable job keys and frozen intake retries.

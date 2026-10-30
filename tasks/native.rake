@@ -35,7 +35,7 @@ module HailerPackaging
     target = TARGETS.fetch(platform)
     rustc, status = Open3.capture2e('rustc', '-vV')
     raise 'Rust toolchain host does not match the Ruby gem platform' unless status.success? && rustc.lines.include?("host: #{target}\n")
-    raise 'cargo build failed' unless system('cargo', 'build', '--release', '--locked', chdir: ROOT)
+    raise 'cargo build failed' unless system('cargo', 'build', '--release', '--locked', '--features', 'ses,postmark', chdir: ROOT)
 
     File.join(data.fetch('target_directory'), 'release', 'hailer')
   end

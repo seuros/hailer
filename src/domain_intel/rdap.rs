@@ -10,6 +10,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jiff::Timestamp;
+use rama::http::client::DefaultHttpWebClient;
+use rama::http::service::client::HttpClientExt;
+use rama::http::{BodyExtractExt, StatusCode};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -18,6 +21,7 @@ use super::{DomainFacts, IntelError};
 
 const DEFAULT_BOOTSTRAP_URL: &str = "https://data.iana.org/rdap/dns.json";
 const BOOTSTRAP_TTL: Duration = Duration::from_hours(24);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 type BootstrapMap = HashMap<String, Vec<String>>;
 type BootstrapCache = Mutex<Option<(Instant, BootstrapMap)>>;
@@ -42,7 +46,7 @@ struct Event {
 }
 
 pub struct RdapClient {
-    http: reqwest::Client,
+    http: DefaultHttpWebClient,
     bootstrap_url: String,
     bootstrap: BootstrapCache,
 }
@@ -55,14 +59,7 @@ impl RdapClient {
     /// Only the test suite overrides this, to point at a loopback fixture
     /// that serves both the bootstrap file and a canned domain response.
     pub fn with_bootstrap_url(bootstrap_url: String) -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("static reqwest client config"),
-            bootstrap_url,
-            bootstrap: Mutex::new(None),
-        }
+        Self { http: DefaultHttpWebClient::default(), bootstrap_url, bootstrap: Mutex::new(None) }
     }
 
     async fn bootstrap_map(&self) -> Result<BootstrapMap, IntelError> {
@@ -77,7 +74,7 @@ impl RdapClient {
         let response = self
             .http
             .get(&self.bootstrap_url)
-            .send()
+            .send_with_timeout(TIMEOUT)
             .await
             .map_err(|error| IntelError::Transport(error.to_string()))?;
         if !response.status().is_success() {
@@ -87,7 +84,7 @@ impl RdapClient {
             )));
         }
         let body: Bootstrap = response
-            .json()
+            .try_into_json()
             .await
             .map_err(|error| IntelError::InvalidResponse(error.to_string()))?;
         let mut map = HashMap::new();
@@ -119,10 +116,10 @@ impl RdapClient {
         let response = self
             .http
             .get(format!("{base}domain/{domain}"))
-            .send()
+            .send_with_timeout(TIMEOUT)
             .await
             .map_err(|error| IntelError::Transport(error.to_string()))?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NOT_FOUND {
             // Not registered (or the registry simply never heard of it) -
             // neither case is "new", so this is not treated as an error.
             return Ok(DomainFacts::UNKNOWN);
@@ -134,7 +131,7 @@ impl RdapClient {
             )));
         }
         let body: DomainResponse = response
-            .json()
+            .try_into_json()
             .await
             .map_err(|error| IntelError::InvalidResponse(error.to_string()))?;
         let registered_at = body

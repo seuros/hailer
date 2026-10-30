@@ -6,8 +6,10 @@
 
 pub mod domain_block_guard;
 pub mod guard;
+#[cfg(feature = "postmark")]
 pub mod postmark;
 pub mod queued;
+#[cfg(feature = "ses")]
 pub mod ses;
 #[cfg(test)]
 mod test_support;

@@ -78,9 +78,20 @@ The source (`ruby`) gem has the same Rails client and launcher, but no binary.
 For source development or an unsupported platform:
 
 ```sh
-cargo install --path . --locked
+cargo install --path . --locked --features ses,postmark
 export HAILER_BINARY=/absolute/path/to/hailer
 ```
+
+Each provider is a cargo feature, and a build needs at least one. Platform
+gems carry both.
+
+| Feature | Adds |
+| --- | --- |
+| `ses` | AWS SDK (SESv2, SQS, STS): SES sending, SQS feedback, suppression sync, rate discovery, `ses-*` and `sync-suppressions` commands |
+| `postmark` | MIME parsing for Postmark's JSON API, `postmark-server` command |
+
+A binary without the configured provider refuses to start and names the
+feature to rebuild with.
 
 Run it as a Mothership HTTP bay. Merge this example into your fleet manifest;
 the bind must stay private and must not be routed on a public listener:
@@ -455,7 +466,7 @@ missing code.
 ```sh
 bundle install
 bundle exec rake
-HAILER_TEST_DATABASE_URL=postgres://test_user:password@127.0.0.1/hailer_test cargo test --locked
+HAILER_TEST_DATABASE_URL=postgres://test_user:password@127.0.0.1/hailer_test cargo test --locked --features ses,postmark
 cargo fmt --all -- --check
 ```
 

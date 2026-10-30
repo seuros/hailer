@@ -1,9 +1,3 @@
-# Standalone workspace root. Hailer lives inside the Atlas Monkey Fleet
-# checkout but docks with mothership and ships on its own: an empty
-# `[workspace]` table opts this crate out of the parent workspace, so a
-# fresh clone of this repository builds with its own resolution, its own
-# lockfile, and its own release profile (build isolation). The fleet root
-# lists it under `exclude`, not `members`.
 [workspace]
 
 [package]
@@ -12,7 +6,7 @@ version = "0.6.0"
 edition = "2024"
 rust-version = "1.99"
 authors = ["Abdelkader Boudih <oss@seuros.com>"]
-description = "Outbound mail delivery ship for Mothership: SES sender with pluggable backends"
+description = "Outbound mail delivery ship for Mothership: SES or Postmark sender"
 license = "BSD-3-Clause"
 repository = "https://github.com/seuros/hailer"
 
@@ -20,79 +14,43 @@ repository = "https://github.com/seuros/hailer"
 name = "hailer"
 path = "src/main.rs"
 
+[features]
+ses = ["dep:aws-config", "dep:aws-sdk-sesv2", "dep:aws-sdk-sqs", "dep:aws-sdk-sts"]
+postmark = ["dep:mail-parser", "dep:base64"]
+
 [dependencies]
-# Core async runtime
-tokio = { version = "1.53", features = ["full", "signal"] }
+tokio = { version = "1", features = ["full", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-
-# Docking protocol (frame types + HTTP-bay codec; no client helper, hailer
-# writes its own Dock/Moored handshake + Hail/Haul/Reply loop in src/bay/)
-mothership-docking-protocol = "0.3.0"
-
-# AWS SES (SESv2 unified send_email, EmailContent::Raw for raw MIME) and its
-# credential chain
-aws-sdk-sesv2 = "1.140"
-aws-config = "1.12"
-
-# SES feedback arrives through a private SQS queue subscribed to SNS.
-aws-sdk-sqs = "1.114"
-aws-sdk-sts = "1.119"
+mothership-docking-protocol = "0.3"
+aws-config = { version = "1", optional = true }
+aws-sdk-sesv2 = { version = "1", optional = true }
+aws-sdk-sqs = { version = "1", optional = true }
+aws-sdk-sts = { version = "1", optional = true }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "migrate", "macros"] }
-
-# Optional address-verification middleware (Emailable today; the trait in
-# src/verify.rs keeps other providers swappable). rustls-tls reuses the TLS
-# stack aws-sdk already pulls in via hyper-rustls - no second stack.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
-# Postmark takes JSON, not raw MIME: parse the message, base64 its attachments.
-mail-parser = "1.0.0"
-base64 = "0.22"
-
-# Recipient address validation at the boundary. `emval` was tried first (per
-# the dependency research) but turned out to be a Python-extension-first
-# crate (hard pyo3 + polars dependency, no way to opt out) that fails to
-# link as a plain Rust dependency; `email_address` is a plain, dependency-light
-# RFC 5322 checker, update cadence stalled since 2024 but address syntax does
-# not change, and it actually links.
+rama = { version = "0.4", features = ["http-backend", "dns", "tcp", "rustls", "aws-lc"] }
+mail-parser = { version = "1", optional = true }
+base64 = { version = "0.23", optional = true }
 email_address = { version = "0.2", default-features = false }
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-
-# Docking link read-buffer management (bay.rs frame reader)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
 bytes = "1"
-
-# Configuration
-toml = "1.1"
-
-# Logging
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-
-# CLI
-usage-rs = "7.0.0"
-
-# Errors
-anyhow = "1.0"
-thiserror = "2.0"
-
-# Wall-clock time (fleet convention); monotonic timers stay on tokio/std.
-jiff = { version = "0.2.38", default-features = false, features = ["std"] }
-
-# Resilience (fleet convention). SES's SDK has its own retry; these own
-# backoff/circuit-breaking/rate-limiting instead so hailer's send path
-# behaves like the rest of the fleet, not like the AWS SDK defaults.
-breaker-machines = { version = "0.20.0", features = ["async"] }
+usage-rs = "7"
+anyhow = "1"
+thiserror = "2"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+breaker-machines = { version = "0.20", features = ["async"] }
 chrono-machines = "0.9"
-throttle-machines = "0.3.1"
+throttle-machines = "0.3"
 behavior-machines = "0.2"
-behavior-machines-circuit = "0.1"
-state-machines = { version = "0.32.1", features = ["dynamic", "serde"] }
+behavior-machines-circuit = "0.3"
+state-machines = { version = "0.32", features = ["dynamic", "serde"] }
 
 [dev-dependencies]
-tempfile = "3.27"
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "deny"
@@ -103,10 +61,8 @@ dead_code_pub_in_binary = "warn"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+significant_drop_tightening = "allow"
 
-# Release settings are owned by this repository rather than inherited from
-# the fleet workspace: released binaries must not depend on a parent
-# profile. Legal here because this manifest is its own workspace root.
 [profile.release]
 lto = true
 codegen-units = 1

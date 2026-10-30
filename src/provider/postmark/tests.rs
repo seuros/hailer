@@ -206,6 +206,7 @@ const BLACK_HOLE: &str = "test@blackhole.postmarkapp.com";
 const HARD_BOUNCE: &str = "hardbounce@bounce-testing.postmarkapp.com";
 
 fn live() -> (String, String) {
+    crate::install_crypto_provider().expect("TLS crypto provider");
     (
         std::env::var("POSTMARK_SERVER_TOKEN").expect("POSTMARK_SERVER_TOKEN"),
         std::env::var("HAILER_POSTMARK_FROM").expect("HAILER_POSTMARK_FROM"),

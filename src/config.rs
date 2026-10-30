@@ -20,6 +20,9 @@ pub enum ConfigError {
     InvalidEnv(&'static str, &'static str),
     #[error("configuration {0} is invalid: {1}")]
     InvalidConfig(&'static str, &'static str),
+    #[cfg(not(all(feature = "ses", feature = "postmark")))]
+    #[error("this hailer was built without `{0}`: rebuild with --features {0}")]
+    MissingFeature(&'static str),
 }
 
 /// Where mothership expects this ship to listen, and how it identifies
@@ -96,6 +99,17 @@ pub enum ProviderKind {
     #[default]
     Ses,
     Postmark,
+}
+
+#[cfg(not(all(feature = "ses", feature = "postmark")))]
+impl ProviderKind {
+    /// The cargo feature that compiles this provider in.
+    pub const fn feature(self) -> &'static str {
+        match self {
+            Self::Ses => "ses",
+            Self::Postmark => "postmark",
+        }
+    }
 }
 
 /// `POSTMARK_SERVER_TOKEN` is read from the environment, never from here.

@@ -9,9 +9,12 @@ mod message;
 #[cfg(test)]
 mod tests;
 
+use std::io::ErrorKind;
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use rama::http::BodyExtractExt;
+use rama::http::client::DefaultHttpWebClient;
+use rama::http::service::client::HttpClientExt;
 use serde::Deserialize;
 use tracing::warn;
 
@@ -23,9 +26,10 @@ use crate::provider::{MailProvider, ProviderError, SendCircuit};
 
 const API: &str = "https://api.postmarkapp.com";
 const INACTIVE_RECIPIENT: i64 = 406;
+const TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct PostmarkProvider {
-    http: reqwest::Client,
+    http: DefaultHttpWebClient,
     api: String,
     token: String,
     stream: String,
@@ -74,11 +78,7 @@ impl PostmarkProvider {
 
     fn with_api(token: String, config: &PostmarkConfig, api: String) -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(3))
-                .timeout(Duration::from_secs(20))
-                .build()
-                .expect("static reqwest client config"),
+            http: DefaultHttpWebClient::default(),
             api,
             token,
             stream: config.message_stream.clone(),
@@ -91,16 +91,17 @@ impl PostmarkProvider {
         let response = self
             .http
             .get(format!("{}/server", self.api))
-            .header("X-Postmark-Server-Token", &self.token)
-            .header(ACCEPT, "application/json")
-            .send()
-            .await?;
+            .header("x-postmark-server-token", self.token.as_str())
+            .header("accept", "application/json")
+            .send_with_timeout(TIMEOUT)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
         anyhow::ensure!(
             response.status().is_success(),
             "Postmark server lookup returned HTTP {}",
             response.status()
         );
-        Ok(response.json().await?)
+        response.try_into_json().await.map_err(|error| anyhow::anyhow!(error))
     }
 
     fn render(
@@ -116,23 +117,23 @@ impl PostmarkProvider {
         let response = match self
             .http
             .post(format!("{}/email", self.api))
-            .header("X-Postmark-Server-Token", &self.token)
-            .header(ACCEPT, "application/json")
-            .header(CONTENT_TYPE, "application/json")
+            .header("x-postmark-server-token", self.token.as_str())
+            .header("accept", "application/json")
+            .header("content-type", "application/json")
             .body(body)
-            .send()
+            .send_with_timeout(TIMEOUT)
             .await
         {
             Ok(response) => response,
-            Err(error) if error.is_connect() || error.is_builder() => return Answer::Unsent,
+            Err(error) if never_connected(&*error) => return Answer::Unsent,
             Err(_) => return Answer::Unknown,
         };
         let status = response.status().as_u16();
         let reply = response
-            .bytes()
+            .try_into_string()
             .await
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<Reply>(&bytes).ok());
+            .and_then(|text| serde_json::from_str::<Reply>(&text).ok());
         if status != 200 {
             return Answer::Refused { status, code: reply.and_then(|reply| reply.error_code) };
         }
@@ -156,6 +157,27 @@ impl PostmarkProvider {
             _ => Answer::Unknown,
         }
     }
+}
+
+/// A refused or unroutable connection: the request cannot have left.
+/// Anything else, including a timeout, may have reached Postmark.
+fn never_connected(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if let Some(io) = current.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::AddrNotAvailable
+                    | ErrorKind::NetworkUnreachable
+                    | ErrorKind::HostUnreachable
+            )
+        {
+            return true;
+        }
+        cause = current.source();
+    }
+    false
 }
 
 fn send_result(answer: Answer) -> Result<String, ProviderError> {

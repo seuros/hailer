@@ -12,7 +12,15 @@
 //! receipts are retried by SQS. Shutdown stops admission and drains owned
 //! operations within a bounded deadline. Sends interrupted at that deadline
 //! can still have ambiguous outcomes and must not be blindly retried.
+#![cfg_attr(
+    not(all(feature = "ses", feature = "postmark")),
+    allow(dead_code, reason = "a single-provider build leaves the other provider's half unused")
+)]
 
+#[cfg(not(any(feature = "ses", feature = "postmark")))]
+compile_error!("hailer needs a mail provider: build with --features ses, postmark, or both");
+
+#[cfg(feature = "ses")]
 mod aws_client;
 mod bay;
 mod config;
@@ -27,6 +35,7 @@ mod provider;
 mod runtime;
 mod state;
 mod supervisor;
+#[cfg(feature = "ses")]
 mod suppression_sync;
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
@@ -35,13 +44,15 @@ mod verify;
 
 use std::sync::Arc;
 
+#[cfg(feature = "postmark")]
 use provider::postmark::PostmarkProvider;
+#[cfg(feature = "ses")]
 use provider::ses::SesProvider;
 use tracing::{error, info, warn};
 
 use crate::config::{
     Config, ConfigError, DockingConfig, DomainIntelConfig, EmailVerificationConfig, IntelKind,
-    ProviderKind, VerifierKind,
+    VerifierKind,
 };
 use crate::domain_intel::Intel;
 use crate::domain_intel::rdap::RdapClient;
@@ -185,6 +196,7 @@ struct SesIdentitiesArgs {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    install_crypto_provider()?;
 
     tracing_subscriber::fmt()
         .json()
@@ -218,24 +230,9 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", serde_json::json!({"imported": count}));
         return Ok(());
     }
-    if let Some(Command::SyncSuppressions(SyncArgs { restart })) = args.command {
-        let aws = aws_client::load_config().await;
-        let source = suppression_sync::AwsSuppressions::new(&aws).await?;
-        let report = suppression_sync::run(&source, &store, restart).await?;
-        println!("{}", serde_json::to_string(&report)?);
-        return Ok(());
-    }
-    if matches!(args.command, Some(Command::SesAccount)) {
-        print_ses_account().await?;
-        return Ok(());
-    }
-    if let Some(Command::SesIdentities(SesIdentitiesArgs { identities })) = &args.command {
-        print_ses_identities(identities).await?;
-        return Ok(());
-    }
-    if matches!(args.command, Some(Command::PostmarkServer)) {
-        let server = postmark(&config)?.server().await?;
-        println!("{}", serde_json::to_string(&server)?);
+    if let Some(command) = &args.command
+        && provider_command(command, &store, &config).await?
+    {
         return Ok(());
     }
 
@@ -255,7 +252,6 @@ async fn main() -> anyhow::Result<()> {
         "Starting hailer"
     );
 
-    let aws = aws_client::load_config().await;
     let control = Arc::new(
         control::Control::new(
             store.pool.clone(),
@@ -267,24 +263,66 @@ async fn main() -> anyhow::Result<()> {
     let verifier = Arc::new(build_verifier(config.email_verification.as_ref())?);
     let intel = Arc::new(build_intel(config.domain_intel.as_ref()));
     match config.provider {
-        ProviderKind::Ses => {
+        #[cfg(feature = "ses")]
+        config::ProviderKind::Ses => {
+            let aws = aws_client::load_config().await;
             let provider =
                 Arc::new(SesProvider::new(&aws, config.ses_configuration_set.as_deref()));
-            supervisor::run(docking, config, aws, provider, store, control, verifier, intel)
-                .await?;
+            supervisor::run(docking, config, provider, store, control, verifier, intel).await?;
         }
-        ProviderKind::Postmark => {
+        #[cfg(feature = "postmark")]
+        config::ProviderKind::Postmark => {
             let provider = Arc::new(postmark(&config)?);
-            supervisor::run(docking, config, aws, provider, store, control, verifier, intel)
-                .await?;
+            supervisor::run(docking, config, provider, store, control, verifier, intel).await?;
         }
+        #[cfg(not(all(feature = "ses", feature = "postmark")))]
+        missing => return Err(ConfigError::MissingFeature(missing.feature()).into()),
     }
 
     info!("hailer stopped");
     Ok(())
 }
 
+/// The commands that talk to a provider; `false` when `command` is not one.
+async fn provider_command(
+    command: &Command,
+    #[cfg_attr(not(feature = "ses"), expect(unused_variables))] store: &state::Store,
+    #[cfg_attr(not(feature = "postmark"), expect(unused_variables))] config: &Config,
+) -> anyhow::Result<bool> {
+    match command {
+        #[cfg(feature = "ses")]
+        Command::SyncSuppressions(SyncArgs { restart }) => {
+            let aws = aws_client::load_config().await;
+            let source = suppression_sync::AwsSuppressions::new(&aws).await?;
+            let report = suppression_sync::run(&source, store, *restart).await?;
+            println!("{}", serde_json::to_string(&report)?);
+        }
+        #[cfg(feature = "ses")]
+        Command::SesAccount => print_ses_account().await?,
+        #[cfg(feature = "ses")]
+        Command::SesIdentities(SesIdentitiesArgs { identities }) => {
+            print_ses_identities(identities).await?;
+        }
+        #[cfg(not(feature = "ses"))]
+        Command::SyncSuppressions(_) | Command::SesAccount | Command::SesIdentities(_) => {
+            return Err(ConfigError::MissingFeature("ses").into());
+        }
+        #[cfg(feature = "postmark")]
+        Command::PostmarkServer => {
+            let server = postmark(config)?.server().await?;
+            println!("{}", serde_json::to_string(&server)?);
+        }
+        #[cfg(not(feature = "postmark"))]
+        Command::PostmarkServer => {
+            return Err(ConfigError::MissingFeature("postmark").into());
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// `POSTMARK_SERVER_TOKEN` comes from the environment, like `EMAILABLE_API_KEY`.
+#[cfg(feature = "postmark")]
 fn postmark(config: &Config) -> anyhow::Result<PostmarkProvider> {
     let token = std::env::var("POSTMARK_SERVER_TOKEN")
         .map_err(|_| ConfigError::MissingEnv("POSTMARK_SERVER_TOKEN"))?;
@@ -313,6 +351,7 @@ fn build_intel(config: Option<&DomainIntelConfig>) -> Intel {
     }
 }
 
+#[cfg(feature = "ses")]
 async fn print_ses_account() -> anyhow::Result<()> {
     let aws = aws_client::load_config().await;
     let client = aws_client::ses_client(&aws, Some(aws_client::TIMEOUT));
@@ -333,6 +372,7 @@ async fn print_ses_account() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ses")]
 async fn print_ses_identities(identities: &str) -> anyhow::Result<()> {
     let aws = aws_client::load_config().await;
     let client = aws_client::ses_client(&aws, Some(aws_client::TIMEOUT));
@@ -355,6 +395,18 @@ async fn print_ses_identities(identities: &str) -> anyhow::Result<()> {
         results.insert(identity.to_string(), value);
     }
     println!("{}", serde_json::Value::Object(results));
+    Ok(())
+}
+
+/// rustls carries both ring and aws-lc-rs (the AWS SDK pulls ring), so it
+/// cannot pick one itself. aws-lc-rs is the one the SDK's own client uses.
+fn install_crypto_provider() -> anyhow::Result<()> {
+    use rama::tls::rustls::dep::rustls::crypto::{CryptoProvider, aws_lc_rs};
+    if CryptoProvider::get_default().is_none() {
+        aws_lc_rs::default_provider()
+            .install_default()
+            .map_err(|_| anyhow::anyhow!("could not install the TLS crypto provider"))?;
+    }
     Ok(())
 }
 
