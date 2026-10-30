@@ -3,7 +3,7 @@ use sqlx::{Postgres, Row, Transaction};
 
 use super::dispatch::record_outcome;
 use super::store::event;
-use super::{Correlation, Envelope, valid_id};
+use super::{Correlation, Envelope};
 use crate::feedback::FeedbackEvent;
 use crate::provider::queued::DispatchOutcome;
 use crate::state::Store;
@@ -28,7 +28,7 @@ impl Store {
             let Some((hailer_message_id, attempt_id)) = bound else { return Ok(()) };
             Correlation { hailer_message_id, attempt_id }
         };
-        if !valid_id(&correlation.hailer_message_id) || !valid_id(&correlation.attempt_id) {
+        if !correlation.is_valid() {
             return Ok(());
         }
         sqlx::query("SELECT id FROM hailer.outbound_counter WHERE id = 1 FOR UPDATE")

@@ -32,6 +32,12 @@ pub struct Correlation {
     pub attempt_id: String,
 }
 
+impl Correlation {
+    pub fn is_valid(&self) -> bool {
+        valid_id(&self.hailer_message_id) && valid_id(&self.attempt_id)
+    }
+}
+
 pub fn valid_id(id: &str) -> bool {
     id.len() == 36
         && id.bytes().enumerate().all(|(index, byte)| {

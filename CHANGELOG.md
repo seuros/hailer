@@ -2,6 +2,8 @@
 
 ## Working tree — durable delivery (unreleased)
 
+- Postmark provider (`provider = "postmark"`, `[postmark] message_stream`, `POSTMARK_SERVER_TOKEN`): Rails MIME parsed into Postmark's JSON, sync and queued sends, correlation as Metadata, `hailer postmark-server` token check. SES-only settings are refused with it.
+
 - Opt-in `:hailer_queued` Rails adapter with stable job keys and frozen intake retries.
 - PostgreSQL ownership receipts, immutable submission replay/conflict and explicit spool budgets.
 - Supervised fenced dispatch, journaled attempts, safe retries and held unknown outcomes.

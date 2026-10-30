@@ -1,20 +1,26 @@
 //! Pluggable outbound send backends.
 //!
 //! One backend is active per deployment, chosen in `main.rs` from
-//! [`crate::config::Config`]. SES is the only implementation today
-//! (`provider/ses.rs`); a future SMTP/Postmark backend implements the same
-//! trait and is swapped in the same way — no change to `bay.rs` or `mail.rs`.
+//! [`crate::config::Config`]: SES (`provider/ses.rs`) or Postmark
+//! (`provider/postmark.rs`). Neither `bay.rs` nor `mail.rs` knows which.
 
 pub mod domain_block_guard;
 pub mod guard;
+pub mod postmark;
 pub mod queued;
 pub mod ses;
+#[cfg(test)]
+mod test_support;
 pub mod verify_guard;
 
 use std::future::Future;
+use std::sync::Arc;
+
+use breaker_machines::{AsyncCircuitBreaker, CircuitError, PredicateClassifier};
 use thiserror::Error;
 
 use crate::mail::SendRequest;
+use queued::{DispatchFailure, DispatchOutcome};
 
 /// A failure is not a promise that retrying a send is safe.
 #[derive(Debug, Error)]
@@ -76,5 +82,73 @@ pub trait MailProvider: Send + Sync {
 
     fn circuit_state(&self) -> &'static str {
         "unreported"
+    }
+}
+
+/// The breaker every provider sends through. Only transport failures and
+/// unknown outcomes count; a rejection or invalid input never trips it.
+struct SendCircuit {
+    breaker: AsyncCircuitBreaker,
+    provider: &'static str,
+}
+
+impl SendCircuit {
+    fn new(name: &'static str, provider: &'static str) -> Self {
+        Self {
+            provider,
+            breaker: AsyncCircuitBreaker::builder(name)
+                .failure_threshold(5)
+                .failure_window_secs(30.0)
+                .half_open_timeout_secs(15.0)
+                .success_threshold(2)
+                .failure_classifier(Arc::new(PredicateClassifier::new(|context| {
+                    context.error.downcast_ref::<ProviderError>().map_or_else(
+                        || {
+                            context
+                                .error
+                                .downcast_ref::<DispatchFailure>()
+                                .is_none_or(DispatchFailure::counts_as_failure)
+                        },
+                        ProviderError::counts_as_failure,
+                    )
+                })))
+                .build_async(),
+        }
+    }
+
+    async fn send<F, Fut>(&self, call: F) -> Result<String, ProviderError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<String, ProviderError>>,
+    {
+        match self.breaker.call(call).await {
+            Ok(id) => Ok(id),
+            Err(CircuitError::Execution(error)) => Err(error),
+            Err(_) => {
+                Err(ProviderError::Transport(format!("{} circuit open or busy", self.provider)))
+            }
+        }
+    }
+
+    async fn dispatch<F, Fut>(&self, call: F) -> DispatchOutcome
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<String, DispatchFailure>>,
+    {
+        match self.breaker.call(call).await {
+            Ok(id) => DispatchOutcome::Accepted(id),
+            Err(CircuitError::Execution(error)) => error.outcome(),
+            Err(_) => DispatchOutcome::NotDispatched("provider_circuit_busy"),
+        }
+    }
+
+    fn state(&self) -> &'static str {
+        if self.breaker.is_open() {
+            "open"
+        } else if self.breaker.is_closed() {
+            "closed"
+        } else {
+            "half_open"
+        }
     }
 }

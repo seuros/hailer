@@ -3,23 +3,21 @@
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use aws_sdk_sesv2::Client;
 use aws_sdk_sesv2::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_sesv2::primitives::Blob;
 use aws_sdk_sesv2::types::{Destination, EmailContent, MessageTag, RawMessage};
-use breaker_machines::{AsyncCircuitBreaker, CircuitError, PredicateClassifier};
 
 use crate::mail::SendRequest;
-use crate::outbound::{Correlation, valid_id};
+use crate::outbound::Correlation;
 use crate::provider::queued::{DispatchFailure, DispatchOutcome, QueuedProvider};
-use crate::provider::{MailProvider, ProviderError};
+use crate::provider::{MailProvider, ProviderError, SendCircuit};
 
 pub struct SesProvider {
     client: Client,
-    breaker: AsyncCircuitBreaker,
+    circuit: SendCircuit,
     configuration_set: Option<String>,
 }
 
@@ -32,23 +30,7 @@ impl SesProvider {
         Self {
             configuration_set: configuration_set.map(str::to_owned),
             client,
-            breaker: AsyncCircuitBreaker::builder("ses_send")
-                .failure_threshold(5)
-                .failure_window_secs(30.0)
-                .half_open_timeout_secs(15.0)
-                .success_threshold(2)
-                .failure_classifier(Arc::new(PredicateClassifier::new(|context| {
-                    context.error.downcast_ref::<ProviderError>().map_or_else(
-                        || {
-                            context
-                                .error
-                                .downcast_ref::<DispatchFailure>()
-                                .is_none_or(DispatchFailure::counts_as_failure)
-                        },
-                        ProviderError::counts_as_failure,
-                    )
-                })))
-                .build_async(),
+            circuit: SendCircuit::new("ses_send", "SES"),
         }
     }
 
@@ -77,7 +59,7 @@ impl SesProvider {
             call = call.from_email_address(from);
         }
         if let Some(correlation) = correlation {
-            if !valid_id(&correlation.hailer_message_id) || !valid_id(&correlation.attempt_id) {
+            if !correlation.is_valid() {
                 return Err(ProviderError::InvalidRequest);
             }
             for (name, value) in [
@@ -171,21 +153,11 @@ impl MailProvider for SesProvider {
     async fn send(&self, request: &SendRequest) -> Result<String, ProviderError> {
         // Invalid input must not consume a half-open probe or trip a circuit.
         request.validate()?;
-        match self.breaker.call(|| self.send_inner(request)).await {
-            Ok(id) => Ok(id),
-            Err(CircuitError::Execution(error)) => Err(error),
-            Err(_) => Err(ProviderError::Transport("SES circuit open or busy".into())),
-        }
+        self.circuit.send(|| self.send_inner(request)).await
     }
 
     fn circuit_state(&self) -> &'static str {
-        if self.breaker.is_open() {
-            "open"
-        } else if self.breaker.is_closed() {
-            "closed"
-        } else {
-            "half_open"
-        }
+        self.circuit.state()
     }
 }
 
@@ -194,10 +166,6 @@ impl QueuedProvider for SesProvider {
         if request.validate().is_err() {
             return DispatchOutcome::NotAccepted { code: "invalid_message", retryable: false };
         }
-        match self.breaker.call(|| self.dispatch_inner(request, correlation)).await {
-            Ok(id) => DispatchOutcome::Accepted(id),
-            Err(CircuitError::Execution(error)) => error.outcome(),
-            Err(_) => DispatchOutcome::NotDispatched("provider_circuit_busy"),
-        }
+        self.circuit.dispatch(|| self.dispatch_inner(request, correlation)).await
     }
 }

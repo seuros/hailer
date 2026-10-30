@@ -44,6 +44,10 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 # stack aws-sdk already pulls in via hyper-rustls - no second stack.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# Postmark takes JSON, not raw MIME: parse the message, base64 its attachments.
+mail-parser = "1.0.0"
+base64 = "0.22"
+
 # Recipient address validation at the boundary. `emval` was tried first (per
 # the dependency research) but turned out to be a Python-extension-first
 # crate (hard pyo3 + polars dependency, no way to opt out) that fails to

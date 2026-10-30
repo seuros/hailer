@@ -36,12 +36,13 @@ mod verify;
 use std::sync::Arc;
 use std::time::Duration;
 
+use provider::postmark::PostmarkProvider;
 use provider::ses::SesProvider;
 use tracing::{error, info, warn};
 
 use crate::config::{
     Config, ConfigError, DockingConfig, DomainIntelConfig, EmailVerificationConfig, IntelKind,
-    VerifierKind,
+    ProviderKind, VerifierKind,
 };
 use crate::domain_intel::Intel;
 use crate::domain_intel::rdap::RdapClient;
@@ -94,6 +95,8 @@ enum Command {
     SesAccount,
     /// Check SES verification status for one or more email identities (domains)
     SesIdentities(SesIdentitiesArgs),
+    /// Check the Postmark server token and name the server it belongs to
+    PostmarkServer,
 }
 
 #[derive(usage_rs::Args, Debug)]
@@ -231,6 +234,11 @@ async fn main() -> anyhow::Result<()> {
         print_ses_identities(identities).await?;
         return Ok(());
     }
+    if matches!(args.command, Some(Command::PostmarkServer)) {
+        let server = postmark(&config)?.server().await?;
+        println!("{}", serde_json::to_string(&server)?);
+        return Ok(());
+    }
 
     let docking = DockingConfig::from_env().map_err(|error| {
         error!(%error, "hailer must run under Mothership (MS_PID, MS_SHIP, MS_SOCKET_DIR)");
@@ -257,13 +265,31 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?,
     );
-    let provider = Arc::new(SesProvider::new(&aws, config.ses_configuration_set.as_deref()));
     let verifier = Arc::new(build_verifier(config.email_verification.as_ref())?);
     let intel = Arc::new(build_intel(config.domain_intel.as_ref()));
-    supervisor::run(docking, config, aws, provider, store, control, verifier, intel).await?;
+    match config.provider {
+        ProviderKind::Ses => {
+            let provider =
+                Arc::new(SesProvider::new(&aws, config.ses_configuration_set.as_deref()));
+            supervisor::run(docking, config, aws, provider, store, control, verifier, intel)
+                .await?;
+        }
+        ProviderKind::Postmark => {
+            let provider = Arc::new(postmark(&config)?);
+            supervisor::run(docking, config, aws, provider, store, control, verifier, intel)
+                .await?;
+        }
+    }
 
     info!("hailer stopped");
     Ok(())
+}
+
+/// `POSTMARK_SERVER_TOKEN` comes from the environment, like `EMAILABLE_API_KEY`.
+fn postmark(config: &Config) -> anyhow::Result<PostmarkProvider> {
+    let token = std::env::var("POSTMARK_SERVER_TOKEN")
+        .map_err(|_| ConfigError::MissingEnv("POSTMARK_SERVER_TOKEN"))?;
+    Ok(PostmarkProvider::new(token, &config.postmark.clone().unwrap_or_default()))
 }
 
 /// `EMAILABLE_API_KEY` is read here, not from `hailer.toml` - matching how

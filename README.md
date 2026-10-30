@@ -7,7 +7,7 @@ This repository is two things:
 - **`hailer` gem** — an ActionMailer adapter, feedback client, and executable
   launcher. Platform gems bundle the Rust binary. No Ruby AWS SDK or native extension.
 - **`hailer` crate** — a standalone Rust mail ship, supervised by Mothership.
-  SESv2 is the first provider.
+  Sends through SESv2 or Postmark.
 
 ```mermaid
 flowchart LR
@@ -105,6 +105,33 @@ if Rails runs in a different network namespace.
 Give the **service**, not the Rails adapter, AWS region and credentials through
 the standard AWS credential chain. Its identity needs `ses:SendEmail`, and the
 SES account/identities must be configured for sending.
+
+### Postmark
+
+```toml
+provider = "postmark"
+
+[postmark]
+message_stream = "outbound"  # the default
+```
+
+Set `POSTMARK_SERVER_TOKEN` in the service's environment, never in
+`hailer.toml`. `hailer postmark-server` checks the token and names its server.
+
+Postmark's API takes JSON, not raw MIME, so Hailer parses the Rails message
+and Postmark rebuilds it. Recipients, subject, text/HTML bodies, attachments
+(inline images by `cid:`), Reply-To, `Message-ID` and other custom headers
+carry over; the MIME structure itself does not. Recipients come from the
+envelope, as with SES. An explicit `smtp_envelope_from` only stands in for a
+missing From header: Postmark owns the bounce address.
+
+The SES-only settings (`ses_configuration_set`, `[feedback]`,
+`[suppression_sync]`, `rate_limit.discover_from_aws`) are refused with
+`provider = "postmark"`. Postmark bounces and suppressions are not read yet,
+so a queued unknown outcome waits for `hailer resolve-message`. Postmark
+refuses a message (406, suppressed) only when every recipient is inactive in
+its suppression list; otherwise it accepts and skips the inactive ones, which
+Hailer logs as a warning with the count, never the addresses.
 
 ### PostgreSQL
 
@@ -410,6 +437,9 @@ The SES SDK makes **one send attempt**. AWS throttling/transient failures return
 503, permanent service rejections 502, and disconnects/timeouts/missing message
 IDs carry the explicit unknown-outcome code. None of these responses authorizes
 an automatic retry of an ambiguous send.
+Postmark sends are single-attempt too: throttling, a refused token and 5xx
+return 503, other refusals 502, and lost or unreadable answers the
+unknown-outcome code.
 
 ## Status
 

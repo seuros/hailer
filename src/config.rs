@@ -79,12 +79,41 @@ pub struct Config {
     pub suppression_sync: Option<SuppressionSyncConfig>,
     pub rate_limit: Option<RateLimitConfig>,
     pub queued: Option<QueuedConfig>,
+    #[serde(default)]
+    pub provider: ProviderKind,
+    pub postmark: Option<PostmarkConfig>,
     pub ses_configuration_set: Option<String>,
     pub email_verification: Option<EmailVerificationConfig>,
     /// Only meaningful for the queued pipeline - a synchronous send has no
     /// way to hold a message for operator review. See
     /// `crate::domain_intel` for why quarantine, not a hard reject.
     pub domain_intel: Option<DomainIntelConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    #[default]
+    Ses,
+    Postmark,
+}
+
+/// `POSTMARK_SERVER_TOKEN` is read from the environment, never from here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostmarkConfig {
+    #[serde(default = "default_message_stream")]
+    pub message_stream: String,
+}
+
+impl Default for PostmarkConfig {
+    fn default() -> Self {
+        Self { message_stream: default_message_stream() }
+    }
+}
+
+fn default_message_stream() -> String {
+    "outbound".to_owned()
 }
 
 /// Which domain-intelligence source backs [`crate::domain_intel::Intel`].
@@ -219,6 +248,8 @@ impl Default for Config {
             suppression_sync: None,
             rate_limit: None,
             queued: None,
+            provider: ProviderKind::default(),
+            postmark: None,
             ses_configuration_set: None,
             email_verification: None,
             domain_intel: None,
@@ -251,6 +282,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_provider()?;
         reject_if(
             self.ses_configuration_set.as_ref().is_some_and(|name| {
                 name.is_empty()
@@ -341,4 +373,42 @@ impl Config {
         }
         Ok(())
     }
+
+    fn validate_provider(&self) -> Result<(), ConfigError> {
+        match self.provider {
+            ProviderKind::Ses => reject_if(
+                self.postmark.is_some(),
+                "postmark",
+                "only valid with provider = \"postmark\"",
+            ),
+            ProviderKind::Postmark => {
+                for (set, name) in [
+                    (self.ses_configuration_set.is_some(), "ses_configuration_set"),
+                    (self.feedback.is_some(), "feedback"),
+                    (self.suppression_sync.is_some(), "suppression_sync"),
+                    (
+                        self.rate_limit.as_ref().is_some_and(|rate| rate.discover_from_aws),
+                        "rate_limit.discover_from_aws",
+                    ),
+                ] {
+                    reject_if(set, name, "SES only; unavailable with provider = \"postmark\"")?;
+                }
+                reject_if(
+                    self.postmark.as_ref().is_some_and(|postmark| {
+                        let stream = &postmark.message_stream;
+                        stream.is_empty()
+                            || stream.len() > 100
+                            || !stream.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+                            })
+                    }),
+                    "postmark.message_stream",
+                    "expected 1..100 ASCII letters, digits, underscores or hyphens",
+                )
+            }
+        }
+    }
 }
+
+#[cfg(test)]
+mod tests;

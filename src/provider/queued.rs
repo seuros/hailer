@@ -27,6 +27,8 @@ pub(super) enum DispatchFailure {
     Rejected,
     #[error("provider definitely did not accept the throttled message")]
     Throttled,
+    #[error("provider refused the credentials before reading the message")]
+    Unauthorized,
     #[error("request definitely did not reach the provider")]
     NotDispatched,
     #[error("provider outcome unknown")]
@@ -35,7 +37,7 @@ pub(super) enum DispatchFailure {
 
 impl DispatchFailure {
     pub const fn counts_as_failure(&self) -> bool {
-        matches!(self, Self::Throttled | Self::Unknown)
+        matches!(self, Self::Throttled | Self::Unauthorized | Self::Unknown)
     }
 
     pub const fn outcome(&self) -> DispatchOutcome {
@@ -45,6 +47,9 @@ impl DispatchFailure {
             }
             Self::Throttled => {
                 DispatchOutcome::NotAccepted { code: "provider_throttled", retryable: true }
+            }
+            Self::Unauthorized => {
+                DispatchOutcome::NotAccepted { code: "provider_unauthorized", retryable: true }
             }
             Self::NotDispatched => DispatchOutcome::NotDispatched("request_not_dispatched"),
             Self::Unknown => DispatchOutcome::Unknown,
