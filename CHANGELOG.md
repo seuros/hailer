@@ -1,12 +1,14 @@
 # Changelog
 
-## Working tree — durable delivery (unreleased)
-
-- Providers are cargo features: `ses` (AWS SDK) and `postmark`; platform gems build with both. A binary without the configured provider refuses to start.
-- HTTP clients (Postmark, Emailable, RDAP) moved from reqwest to rama, with rustls on ring.
-- The AWS SDK is gone: SESv2, SQS and STS go through hailer's own SigV4 client (verified against AWS's signing test suite) with env, shared-file, web identity, container and IMDSv2 credentials. The `ses` build loses 75 crates and aws-lc.
+## 0.7.0
 
 - Postmark provider (`provider = "postmark"`, `[postmark] message_stream`, `POSTMARK_SERVER_TOKEN`): Rails MIME parsed into Postmark's JSON, sync and queued sends, correlation as Metadata, `hailer postmark-server` token check. SES-only settings are refused with it.
+- **Breaking for source builds:** providers are cargo features, `ses` and `postmark`; a build needs at least one, and platform gems carry both. A binary without the configured provider refuses to start and names the feature.
+- The AWS SDK is gone: SESv2, SQS and STS go through hailer's own SigV4 client (verified against AWS's signing test suite) with env, shared-file, web identity, container and IMDSv2 credentials. The platform binary drops from 17 MiB to 9 MiB.
+- HTTP clients (Postmark, Emailable, RDAP) moved from reqwest to rama, with rustls on ring; every request sends `user-agent: hailer/<version>`.
+- Dependency requirements loosened to their compatibility boundary and upgraded (behavior-machines-circuit 0.3, base64 0.23, sha2 0.11).
+
+## Working tree — durable delivery (unreleased)
 
 - Opt-in `:hailer_queued` Rails adapter with stable job keys and frozen intake retries.
 - PostgreSQL ownership receipts, immutable submission replay/conflict and explicit spool budgets.
