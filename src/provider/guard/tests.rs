@@ -1,21 +1,8 @@
 use std::assert_matches;
-use std::sync::Mutex;
 
 use super::*;
 use crate::feedback::test_support::{ADDRESS, hard_bounce};
-
-#[derive(Default)]
-struct FakeSender(Mutex<Vec<SendRequest>>);
-
-impl MailProvider for FakeSender {
-    fn send(
-        &self,
-        request: &SendRequest,
-    ) -> impl std::future::Future<Output = Result<String, ProviderError>> + Send {
-        self.0.lock().expect("requests").push(request.clone());
-        std::future::ready(Ok("ses-id".into()))
-    }
-}
+use crate::provider::test_support::FakeSender;
 
 fn request() -> SendRequest {
     SendRequest {
@@ -28,17 +15,21 @@ fn request() -> SendRequest {
     }
 }
 
+async fn open_control(store: &Store) -> Arc<Control> {
+    Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control"))
+}
+
 #[tokio::test]
 async fn only_suppressed_envelope_recipients_are_removed_and_mime_is_unchanged() {
     let database = crate::test_support::database().await;
     let store = Store::connect(database.url(), 5).await.expect("state");
     store.record(&hard_bounce("feedback")).await.expect("bounce");
     let sender = Arc::new(FakeSender::default());
-    let control = Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control"));
+    let control = open_control(&store).await;
     let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let original = request();
     assert_eq!(guard.send(&original).await.expect("send"), "ses-id");
-    let sent = sender.0.lock().expect("requests").clone();
+    let sent = sender.sent();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].to_addresses, Vec::<String>::new());
     assert_eq!(sent[0].cc_addresses, ["allowed@example.dev"]);
@@ -53,12 +44,12 @@ async fn all_suppressed_recipients_never_reach_the_provider() {
     let store = Store::connect(database.url(), 5).await.expect("state");
     store.record(&hard_bounce("feedback")).await.expect("bounce");
     let sender = Arc::new(FakeSender::default());
-    let control = Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control"));
+    let control = open_control(&store).await;
     let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let mut message = request();
     message.cc_addresses.clear();
     assert_matches!(guard.send(&message).await, Err(ProviderError::Suppressed));
-    assert!(sender.0.lock().expect("requests").is_empty());
+    assert!(sender.sent().is_empty());
 }
 
 #[tokio::test]
@@ -66,11 +57,11 @@ async fn unsuppressed_messages_keep_their_original_envelopes() {
     let database = crate::test_support::database().await;
     let store = Store::connect(database.url(), 5).await.expect("state");
     let sender = Arc::new(FakeSender::default());
-    let control = Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control"));
+    let control = open_control(&store).await;
     let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let message = request();
     guard.send(&message).await.expect("send");
-    let sent = sender.0.lock().expect("requests").clone();
+    let sent = sender.sent();
     assert_eq!(sent[0].to_addresses, message.to_addresses);
     assert_eq!(sent[0].cc_addresses, message.cc_addresses);
     assert_eq!(sent[0].bcc_addresses, message.bcc_addresses);
@@ -103,16 +94,16 @@ async fn bootstrap_drain_storage_loss_and_rate_denials_never_call_the_sender() {
     assert_matches!(guard.send(&request()).await, Err(ProviderError::RateLimited));
     control.drain();
     assert_matches!(guard.send(&request()).await, Err(ProviderError::Transport(_)));
-    assert_eq!(sender.0.lock().expect("calls").len(), 1);
+    assert_eq!(sender.sent().len(), 1);
 
     let guard = SuppressionGuard {
         inner: sender.clone(),
         store: store.clone(),
-        control: Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control")),
+        control: open_control(&store).await,
     };
     store.pool.close().await;
     assert_matches!(guard.send(&request()).await, Err(ProviderError::Transport(_)));
-    assert_eq!(sender.0.lock().expect("calls").len(), 1);
+    assert_eq!(sender.sent().len(), 1);
 }
 
 #[tokio::test]
@@ -121,10 +112,10 @@ async fn invalid_input_is_rejected_before_a_database_lookup() {
     let store = Store::connect(database.url(), 5).await.expect("state");
     store.pool.close().await;
     let sender = Arc::new(FakeSender::default());
-    let control = Arc::new(Control::new(store.pool.clone(), None, true).await.expect("control"));
+    let control = open_control(&store).await;
     let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let mut invalid = request();
     invalid.to_addresses = vec!["invalid".into()];
     assert_matches!(guard.send(&invalid).await, Err(ProviderError::InvalidAddress(_)));
-    assert!(sender.0.lock().expect("calls").is_empty());
+    assert!(sender.sent().is_empty());
 }

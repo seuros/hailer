@@ -191,10 +191,7 @@ async fn discover_rate(
         multiplier: 2.0,
         max_delay_ms: 30_000,
     };
-    let client = crate::aws_client::ses_client(
-        &aws,
-        Some((Duration::from_secs(3), Duration::from_secs(20))),
-    );
+    let client = crate::aws_client::ses_client(&aws, Some(crate::aws_client::TIMEOUT));
     let mut failures = 0u8;
     loop {
         let operation = async { client.get_account().send().await };

@@ -3,8 +3,6 @@
 #[cfg(test)]
 mod tests;
 
-use std::time::Duration;
-
 use aws_sdk_sesv2::Client;
 use aws_sdk_sesv2::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_sesv2::primitives::Blob;
@@ -23,10 +21,7 @@ pub struct SesProvider {
 
 impl SesProvider {
     pub fn new(config: &aws_config::SdkConfig, configuration_set: Option<&str>) -> Self {
-        let client = crate::aws_client::ses_client(
-            config,
-            Some((Duration::from_secs(3), Duration::from_secs(20))),
-        );
+        let client = crate::aws_client::ses_client(config, Some(crate::aws_client::TIMEOUT));
         Self {
             configuration_set: configuration_set.map(str::to_owned),
             client,

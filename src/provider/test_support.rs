@@ -6,6 +6,37 @@ use tokio::net::TcpListener;
 
 use crate::mail::SendRequest;
 use crate::outbound::Correlation;
+use crate::provider::{MailProvider, ProviderError};
+
+/// MOCKED: a provider that accepts everything and records what it was sent.
+#[derive(Default)]
+pub struct FakeSender(Mutex<Vec<SendRequest>>);
+
+impl FakeSender {
+    pub fn sent(&self) -> Vec<SendRequest> {
+        self.0.lock().expect("requests").clone()
+    }
+}
+
+impl MailProvider for FakeSender {
+    fn send(
+        &self,
+        request: &SendRequest,
+    ) -> impl std::future::Future<Output = Result<String, ProviderError>> + Send {
+        self.0.lock().expect("requests").push(request.clone());
+        std::future::ready(Ok("ses-id".into()))
+    }
+}
+
+pub fn request_to(to: &[&str]) -> SendRequest {
+    SendRequest {
+        raw_mime: "From: Alice <alice@example.com>\r\nTo: bob@example.com\r\n\r\nHello".into(),
+        from_email_address: None,
+        to_addresses: to.iter().map(ToString::to_string).collect(),
+        cc_addresses: vec![],
+        bcc_addresses: vec![],
+    }
+}
 
 pub fn request() -> SendRequest {
     SendRequest {

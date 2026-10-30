@@ -34,7 +34,6 @@ mod test_support;
 mod verify;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use provider::postmark::PostmarkProvider;
 use provider::ses::SesProvider;
@@ -220,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(Command::SyncSuppressions(SyncArgs { restart })) = args.command {
-        let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+        let aws = aws_client::load_config().await;
         let source = suppression_sync::AwsSuppressions::new(&aws).await?;
         let report = suppression_sync::run(&source, &store, restart).await?;
         println!("{}", serde_json::to_string(&report)?);
@@ -256,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
         "Starting hailer"
     );
 
-    let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let aws = aws_client::load_config().await;
     let control = Arc::new(
         control::Control::new(
             store.pool.clone(),
@@ -315,9 +314,8 @@ fn build_intel(config: Option<&DomainIntelConfig>) -> Intel {
 }
 
 async fn print_ses_account() -> anyhow::Result<()> {
-    let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client =
-        aws_client::ses_client(&aws, Some((Duration::from_secs(3), Duration::from_secs(20))));
+    let aws = aws_client::load_config().await;
+    let client = aws_client::ses_client(&aws, Some(aws_client::TIMEOUT));
     let resp = client.get_account().send().await?;
     let quota = resp.send_quota();
     println!(
@@ -336,9 +334,8 @@ async fn print_ses_account() -> anyhow::Result<()> {
 }
 
 async fn print_ses_identities(identities: &str) -> anyhow::Result<()> {
-    let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client =
-        aws_client::ses_client(&aws, Some((Duration::from_secs(3), Duration::from_secs(20))));
+    let aws = aws_client::load_config().await;
+    let client = aws_client::ses_client(&aws, Some(aws_client::TIMEOUT));
     let mut results = serde_json::Map::new();
     for identity in identities.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let value = match client.get_email_identity().email_identity(identity).send().await {

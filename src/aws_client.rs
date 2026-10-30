@@ -5,6 +5,13 @@
 
 use std::time::Duration;
 
+/// `(connect, operation)` bounds for SES calls made on a request path.
+pub const TIMEOUT: (Duration, Duration) = (Duration::from_secs(3), Duration::from_secs(20));
+
+pub async fn load_config() -> aws_config::SdkConfig {
+    aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await
+}
+
 /// Builds an SES client with the SDK's retries disabled. `timeout`, when
 /// given as `(connect, operation)`, additionally bounds connection
 /// establishment and per-operation time. Callers that already wrap every
