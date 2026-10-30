@@ -83,7 +83,8 @@ export HAILER_BINARY=/absolute/path/to/hailer
 ```
 
 Each provider is a cargo feature, and a build needs at least one. Platform
-gems carry both.
+gems carry both. On glibc Linux the build needs libclang (`libclang-dev`):
+rama generates its libresolv bindings with bindgen.
 
 | Feature | Adds |
 | --- | --- |
