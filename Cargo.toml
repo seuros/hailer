@@ -27,7 +27,7 @@ aws-sdk-sesv2 = { version = "1", optional = true }
 aws-sdk-sqs = { version = "1", optional = true }
 aws-sdk-sts = { version = "1", optional = true }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "migrate", "macros"] }
-rama = { version = "0.4", features = ["http-backend", "dns", "tcp", "rustls", "aws-lc"] }
+rama = { version = "0.4", features = ["http-backend", "dns", "tcp", "rustls", "ring"] }
 mail-parser = { version = "1", optional = true }
 base64 = { version = "0.23", optional = true }
 email_address = { version = "0.2", default-features = false }

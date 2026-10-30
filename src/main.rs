@@ -398,12 +398,12 @@ async fn print_ses_identities(identities: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// rustls carries both ring and aws-lc-rs (the AWS SDK pulls ring), so it
-/// cannot pick one itself. aws-lc-rs is the one the SDK's own client uses.
+/// With `ses`, rustls carries aws-lc-rs as well (the AWS SDK's client), so it
+/// cannot pick a provider itself. ring needs no bindgen or libclang to build.
 fn install_crypto_provider() -> anyhow::Result<()> {
-    use rama::tls::rustls::dep::rustls::crypto::{CryptoProvider, aws_lc_rs};
+    use rama::tls::rustls::dep::rustls::crypto::{CryptoProvider, ring};
     if CryptoProvider::get_default().is_none() {
-        aws_lc_rs::default_provider()
+        ring::default_provider()
             .install_default()
             .map_err(|_| anyhow::anyhow!("could not install the TLS crypto provider"))?;
     }
