@@ -88,7 +88,7 @@ rama generates its libresolv bindings with bindgen.
 
 | Feature | Adds |
 | --- | --- |
-| `ses` | AWS SDK (SESv2, SQS, STS): SES sending, SQS feedback, suppression sync, rate discovery, `ses-*` and `sync-suppressions` commands |
+| `ses` | SES sending, SQS feedback, suppression sync, rate discovery, `ses-*` and `sync-suppressions` commands (hailer's own SigV4 client, no AWS SDK) |
 | `postmark` | MIME parsing for Postmark's JSON API, `postmark-server` command |
 
 A binary without the configured provider refuses to start and names the
@@ -114,9 +114,16 @@ docking Unix socket; it does **not** run another HTTP server. For containers,
 use a private network listener with network policy instead of a loopback address
 if Rails runs in a different network namespace.
 
-Give the **service**, not the Rails adapter, AWS region and credentials through
-the standard AWS credential chain. Its identity needs `ses:SendEmail`, and the
-SES account/identities must be configured for sending.
+Give the **service**, not the Rails adapter, AWS region and credentials. Hailer
+looks where the AWS SDKs do, in this order: `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`); the shared `~/.aws/credentials`
+and `~/.aws/config` files (`AWS_PROFILE`, static keys); an EKS web identity
+(`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`); an ECS or EKS Pod Identity
+container role; the EC2 instance role over IMDSv2. A profile that needs SSO,
+`credential_process` or role chaining is refused with the key it uses. The
+region comes from `AWS_REGION`, `AWS_DEFAULT_REGION`, the profile, or IMDS.
+Its identity needs `ses:SendEmail`, and the SES account/identities must be
+configured for sending.
 
 ### Postmark
 

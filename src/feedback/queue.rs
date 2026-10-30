@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -6,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::FeedbackEvent;
+use crate::aws::Aws;
 use crate::config::FeedbackConfig;
 use crate::runtime::Runtime;
 use crate::state::Store;
@@ -23,44 +25,32 @@ pub trait FeedbackQueue: Send + Sync {
 }
 
 pub struct AwsQueue {
-    client: aws_sdk_sqs::Client,
+    aws: Arc<Aws>,
     url: String,
 }
 
 impl AwsQueue {
-    pub fn new(config: &aws_config::SdkConfig, url: String) -> Self {
-        Self { client: aws_sdk_sqs::Client::new(config), url }
+    pub const fn new(aws: Arc<Aws>, url: String) -> Self {
+        Self { aws, url }
     }
 }
 
 impl FeedbackQueue for AwsQueue {
     async fn receive(&self) -> anyhow::Result<Vec<QueuedMessage>> {
-        let output = self
-            .client
-            .receive_message()
-            .queue_url(&self.url)
-            .max_number_of_messages(10)
-            .wait_time_seconds(20)
-            .visibility_timeout(60)
-            .send()
-            .await?;
-        output
-            .messages()
-            .iter()
+        crate::aws::sqs::receive(&self.aws, &self.url)
+            .await?
+            .into_iter()
             .map(|message| {
                 Ok(QueuedMessage {
-                    receipt: message
-                        .receipt_handle()
-                        .context("SQS message missing receipt")?
-                        .into(),
-                    body: message.body().context("SQS message missing body")?.into(),
+                    receipt: message.receipt_handle.context("SQS message missing receipt")?,
+                    body: message.body.context("SQS message missing body")?,
                 })
             })
             .collect()
     }
 
     async fn delete(&self, receipt: &str) -> anyhow::Result<()> {
-        self.client.delete_message().queue_url(&self.url).receipt_handle(receipt).send().await?;
+        crate::aws::sqs::delete(&self.aws, &self.url, receipt).await?;
         Ok(())
     }
 }

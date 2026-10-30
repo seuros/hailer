@@ -21,7 +21,7 @@
 compile_error!("hailer needs a mail provider: build with --features ses, postmark, or both");
 
 #[cfg(feature = "ses")]
-mod aws_client;
+mod aws;
 mod bay;
 mod config;
 mod control;
@@ -41,6 +41,7 @@ mod suppression_sync;
 #[path = "../tests/support/mod.rs"]
 mod test_support;
 mod verify;
+mod web;
 
 use std::sync::Arc;
 
@@ -265,9 +266,8 @@ async fn main() -> anyhow::Result<()> {
     match config.provider {
         #[cfg(feature = "ses")]
         config::ProviderKind::Ses => {
-            let aws = aws_client::load_config().await;
-            let provider =
-                Arc::new(SesProvider::new(&aws, config.ses_configuration_set.as_deref()));
+            let aws = Arc::new(aws::Aws::load().await?);
+            let provider = Arc::new(SesProvider::new(aws, config.ses_configuration_set.as_deref()));
             supervisor::run(docking, config, provider, store, control, verifier, intel).await?;
         }
         #[cfg(feature = "postmark")]
@@ -292,8 +292,8 @@ async fn provider_command(
     match command {
         #[cfg(feature = "ses")]
         Command::SyncSuppressions(SyncArgs { restart }) => {
-            let aws = aws_client::load_config().await;
-            let source = suppression_sync::AwsSuppressions::new(&aws).await?;
+            let aws = Arc::new(aws::Aws::load().await?);
+            let source = suppression_sync::AwsSuppressions::new(aws).await?;
             let report = suppression_sync::run(&source, store, *restart).await?;
             println!("{}", serde_json::to_string(&report)?);
         }
@@ -353,20 +353,18 @@ fn build_intel(config: Option<&DomainIntelConfig>) -> Intel {
 
 #[cfg(feature = "ses")]
 async fn print_ses_account() -> anyhow::Result<()> {
-    let aws = aws_client::load_config().await;
-    let client = aws_client::ses_client(&aws, Some(aws_client::TIMEOUT));
-    let resp = client.get_account().send().await?;
-    let quota = resp.send_quota();
+    let account = aws::ses::account(&aws::Aws::load().await?).await?;
+    let quota = account.send_quota.as_ref();
     println!(
         "{}",
         serde_json::json!({
-            "dedicated_ip_auto_warmup_enabled": resp.dedicated_ip_auto_warmup_enabled(),
-            "production_access_enabled": resp.production_access_enabled(),
-            "sending_enabled": resp.sending_enabled(),
-            "enforcement_status": resp.enforcement_status(),
-            "max_24_hour_send": quota.map(aws_sdk_sesv2::types::SendQuota::max24_hour_send),
-            "max_send_rate": quota.map(aws_sdk_sesv2::types::SendQuota::max_send_rate),
-            "sent_last_24_hours": quota.map(aws_sdk_sesv2::types::SendQuota::sent_last24_hours),
+            "dedicated_ip_auto_warmup_enabled": account.dedicated_ip_auto_warmup_enabled,
+            "production_access_enabled": account.production_access_enabled,
+            "sending_enabled": account.sending_enabled,
+            "enforcement_status": account.enforcement_status,
+            "max_24_hour_send": quota.and_then(|quota| quota.max_24_hour_send),
+            "max_send_rate": quota.and_then(|quota| quota.max_send_rate),
+            "sent_last_24_hours": quota.and_then(|quota| quota.sent_last_24_hours),
         })
     );
     Ok(())
@@ -374,23 +372,19 @@ async fn print_ses_account() -> anyhow::Result<()> {
 
 #[cfg(feature = "ses")]
 async fn print_ses_identities(identities: &str) -> anyhow::Result<()> {
-    let aws = aws_client::load_config().await;
-    let client = aws_client::ses_client(&aws, Some(aws_client::TIMEOUT));
+    let aws = aws::Aws::load().await?;
     let mut results = serde_json::Map::new();
     for identity in identities.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let value = match client.get_email_identity().email_identity(identity).send().await {
-            Ok(resp) => serde_json::json!({
-                "verified_for_sending_status": resp.verified_for_sending_status(),
-                "verification_status": resp.verification_status().map(aws_sdk_sesv2::types::VerificationStatus::as_str),
+        let value = match aws::ses::identity(&aws, identity).await {
+            Ok(found) => serde_json::json!({
+                "verified_for_sending_status": found.verified_for_sending_status,
+                "verification_status": found.verification_status,
             }),
-            Err(error) => {
-                let service = error.as_service_error();
-                serde_json::json!({
-                    "error": service.and_then(aws_sdk_sesv2::error::ProvideErrorMetadata::message)
-                        .unwrap_or("request failed"),
-                    "code": service.and_then(aws_sdk_sesv2::error::ProvideErrorMetadata::code),
-                })
-            }
+            Err(aws::AwsError::Service { code, message, .. }) => serde_json::json!({
+                "error": message.unwrap_or_else(|| "request failed".to_owned()),
+                "code": code,
+            }),
+            Err(error) => serde_json::json!({"error": error.to_string(), "code": null}),
         };
         results.insert(identity.to_string(), value);
     }
@@ -398,8 +392,8 @@ async fn print_ses_identities(identities: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// With `ses`, rustls carries aws-lc-rs as well (the AWS SDK's client), so it
-/// cannot pick a provider itself. ring needs no bindgen or libclang to build.
+/// rustls is built with ring only; installing it explicitly keeps a future
+/// second provider in the tree from making rustls refuse to choose.
 fn install_crypto_provider() -> anyhow::Result<()> {
     use rama::tls::rustls::dep::rustls::crypto::{CryptoProvider, ring};
     if CryptoProvider::get_default().is_none() {

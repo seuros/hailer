@@ -53,9 +53,29 @@ impl Endpoint {
     }
 }
 
-/// A loopback HTTP server answering every JSON request with `status` and
+/// A loopback HTTP server answering every request with `status` and
 /// `body`, or hanging up without a response when `disconnect` is set.
 pub async fn endpoint(status: u16, body: &'static str, disconnect: bool) -> Endpoint {
+    serve(Arc::new(move |_: &str| (!disconnect).then(|| (status, body.to_owned())))).await
+}
+
+/// A loopback HTTP server choosing its answer by request line: the first
+/// route whose `"METHOD /path"` prefix matches wins, anything else is 404.
+pub async fn routed(routes: Vec<(&'static str, u16, String)>) -> Endpoint {
+    serve(Arc::new(move |request_line: &str| {
+        Some(
+            routes
+                .iter()
+                .find(|(prefix, _, _)| request_line.starts_with(prefix))
+                .map_or((404, String::new()), |(_, status, body)| (*status, body.clone())),
+        )
+    }))
+    .await
+}
+
+type Responder = Arc<dyn Fn(&str) -> Option<(u16, String)> + Send + Sync>;
+
+async fn serve(respond: Responder) -> Endpoint {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("fixture listener");
     let url = format!("http://{}", listener.local_addr().expect("fixture address"));
     let calls = Arc::new(AtomicUsize::new(0));
@@ -90,16 +110,17 @@ pub async fn endpoint(status: u16, body: &'static str, disconnect: bool) -> Endp
                 }
             }
             let end = head.expect("headers");
-            recorded.lock().expect("requests").push(Recorded {
-                headers: String::from_utf8_lossy(&bytes[..end]).into_owned(),
-                body: if bytes.len() == end + 4 {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::from_slice(&bytes[end + 4..]).expect("request JSON")
-                },
-            });
+            let headers = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            let raw = String::from_utf8_lossy(&bytes[end + 4..]).into_owned();
+            let body = if raw.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
+            };
+            let answer = respond(headers.lines().next().unwrap_or_default());
+            recorded.lock().expect("requests").push(Recorded { headers, body });
             received.fetch_add(1, Ordering::SeqCst);
-            if !disconnect {
+            if let Some((status, body)) = answer {
                 socket.write_all(format!(
                     "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()

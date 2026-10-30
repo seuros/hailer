@@ -9,7 +9,6 @@ mod message;
 #[cfg(test)]
 mod tests;
 
-use std::io::ErrorKind;
 use std::time::Duration;
 
 use rama::http::BodyExtractExt;
@@ -93,6 +92,7 @@ impl PostmarkProvider {
             .get(format!("{}/server", self.api))
             .header("x-postmark-server-token", self.token.as_str())
             .header("accept", "application/json")
+            .header("user-agent", crate::web::USER_AGENT)
             .send_with_timeout(TIMEOUT)
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -120,12 +120,13 @@ impl PostmarkProvider {
             .header("x-postmark-server-token", self.token.as_str())
             .header("accept", "application/json")
             .header("content-type", "application/json")
+            .header("user-agent", crate::web::USER_AGENT)
             .body(body)
             .send_with_timeout(TIMEOUT)
             .await
         {
             Ok(response) => response,
-            Err(error) if never_connected(&*error) => return Answer::Unsent,
+            Err(error) if crate::web::never_connected(&*error) => return Answer::Unsent,
             Err(_) => return Answer::Unknown,
         };
         let status = response.status().as_u16();
@@ -157,27 +158,6 @@ impl PostmarkProvider {
             _ => Answer::Unknown,
         }
     }
-}
-
-/// A refused or unroutable connection: the request cannot have left.
-/// Anything else, including a timeout, may have reached Postmark.
-fn never_connected(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut cause = Some(error);
-    while let Some(current) = cause {
-        if let Some(io) = current.downcast_ref::<std::io::Error>()
-            && matches!(
-                io.kind(),
-                ErrorKind::ConnectionRefused
-                    | ErrorKind::AddrNotAvailable
-                    | ErrorKind::NetworkUnreachable
-                    | ErrorKind::HostUnreachable
-            )
-        {
-            return true;
-        }
-        cause = current.source();
-    }
-    false
 }
 
 fn send_result(answer: Answer) -> Result<String, ProviderError> {

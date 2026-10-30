@@ -33,6 +33,10 @@ async fn an_accepted_send_returns_postmarks_message_id() {
     assert!(headers.starts_with("post /email "), "{headers}");
     assert!(headers.contains("x-postmark-server-token: test-token"), "{headers}");
     assert!(headers.contains("accept: application/json"), "{headers}");
+    assert!(
+        headers.contains(concat!("user-agent: hailer/", env!("CARGO_PKG_VERSION"))),
+        "{headers}"
+    );
     assert_eq!(body["MessageStream"], "outbound");
     assert_eq!(body["To"], "bob@example.dev");
     assert!(body.get("Metadata").is_none());

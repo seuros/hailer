@@ -2,9 +2,6 @@
 //! the async batch endpoints for bulk pre-screening a list before a send,
 //! not the real-time send path. <https://emailable.com/docs/api/emails/>
 
-#[cfg(test)]
-mod tests;
-
 use std::time::Duration;
 
 use rama::http::BodyExtractExt;
@@ -188,7 +185,8 @@ impl EmailableClient {
         query: &[(&str, &str)],
     ) -> Result<rama::http::Response, VerifyError> {
         self.http
-            .get(format!("{url}?{}", encode_query(query)))
+            .get(format!("{url}?{}", crate::web::encode_pairs(query.iter().copied())))
+            .header("user-agent", crate::web::USER_AGENT)
             .send_with_timeout(self.timeout())
             .await
             .map_err(|_| VerifyError::Transport("emailable request failed".into()))
@@ -261,6 +259,7 @@ impl EmailableClient {
         let response = self
             .http
             .post(&self.batch_url)
+            .header("user-agent", crate::web::USER_AGENT)
             .json(&serde_json::json!({"emails": addresses, "api_key": self.api_key}))
             .send_with_timeout(self.timeout())
             .await
@@ -317,25 +316,4 @@ async fn json<T: DeserializeOwned + Send + 'static>(
     response: rama::http::Response,
 ) -> Result<T, VerifyError> {
     response.try_into_json().await.map_err(|error| VerifyError::InvalidResponse(error.to_string()))
-}
-
-/// `application/x-www-form-urlencoded` pairs: an address's `+` must not
-/// arrive as a space.
-fn encode_query(pairs: &[(&str, &str)]) -> String {
-    let encode = |value: &str| {
-        value
-            .bytes()
-            .map(|byte| match byte {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                    char::from(byte).to_string()
-                }
-                _ => format!("%{byte:02X}"),
-            })
-            .collect::<String>()
-    };
-    pairs
-        .iter()
-        .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
-        .collect::<Vec<_>>()
-        .join("&")
 }

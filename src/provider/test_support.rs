@@ -5,6 +5,8 @@ use crate::provider::{MailProvider, ProviderError};
 
 #[cfg(any(feature = "ses", feature = "postmark"))]
 mod http;
+#[cfg(feature = "ses")]
+pub use http::routed;
 #[cfg(any(feature = "ses", feature = "postmark"))]
 pub use http::{Endpoint, correlation, endpoint, request};
 

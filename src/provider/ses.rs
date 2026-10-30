@@ -3,99 +3,75 @@
 #[cfg(test)]
 mod tests;
 
-use aws_sdk_sesv2::Client;
-use aws_sdk_sesv2::error::{ProvideErrorMetadata, SdkError};
-use aws_sdk_sesv2::primitives::Blob;
-use aws_sdk_sesv2::types::{Destination, EmailContent, MessageTag, RawMessage};
+use std::sync::Arc;
 
+use base64::Engine;
+
+use crate::aws::{Aws, CallError, Response, ses};
 use crate::mail::SendRequest;
 use crate::outbound::Correlation;
 use crate::provider::queued::{DispatchFailure, DispatchOutcome, QueuedProvider};
 use crate::provider::{MailProvider, ProviderError, SendCircuit};
 
 pub struct SesProvider {
-    client: Client,
+    aws: Arc<Aws>,
     circuit: SendCircuit,
     configuration_set: Option<String>,
 }
 
 impl SesProvider {
-    pub fn new(config: &aws_config::SdkConfig, configuration_set: Option<&str>) -> Self {
-        let client = crate::aws_client::ses_client(config, Some(crate::aws_client::TIMEOUT));
+    pub fn new(aws: Arc<Aws>, configuration_set: Option<&str>) -> Self {
         Self {
+            aws,
             configuration_set: configuration_set.map(str::to_owned),
-            client,
             circuit: SendCircuit::new("ses_send", "SES"),
         }
     }
 
-    fn call(
+    /// The `SendEmail` body: raw MIME, the envelope, and the attempt's tags.
+    fn body(
         &self,
         request: &SendRequest,
         correlation: Option<&Correlation>,
-    ) -> Result<aws_sdk_sesv2::operation::send_email::builders::SendEmailFluentBuilder, ProviderError>
-    {
-        let raw = RawMessage::builder()
-            .data(Blob::new(request.raw_mime.as_bytes().to_vec()))
-            .build()
-            .map_err(|_| ProviderError::InvalidRequest)?;
-        let destination = Destination::builder()
-            .set_to_addresses(Some(request.to_addresses.clone()))
-            .set_cc_addresses(Some(request.cc_addresses.clone()))
-            .set_bcc_addresses(Some(request.bcc_addresses.clone()))
-            .build();
-        let mut call = self
-            .client
-            .send_email()
-            .set_configuration_set_name(self.configuration_set.clone())
-            .content(EmailContent::builder().raw(raw).build())
-            .destination(destination);
+    ) -> Result<Vec<u8>, ProviderError> {
+        let mut body = serde_json::json!({
+            "Content": {"Raw": {
+                "Data": base64::engine::general_purpose::STANDARD.encode(request.raw_mime.as_bytes()),
+            }},
+            "Destination": {
+                "ToAddresses": request.to_addresses,
+                "CcAddresses": request.cc_addresses,
+                "BccAddresses": request.bcc_addresses,
+            },
+        });
+        if let Some(set) = &self.configuration_set {
+            body["ConfigurationSetName"] = set.as_str().into();
+        }
         if let Some(from) = &request.from_email_address {
-            call = call.from_email_address(from);
+            body["FromEmailAddress"] = from.as_str().into();
         }
         if let Some(correlation) = correlation {
             if !correlation.is_valid() {
                 return Err(ProviderError::InvalidRequest);
             }
-            for (name, value) in [
-                ("hailer_message_id", &correlation.hailer_message_id),
-                ("hailer_attempt_id", &correlation.attempt_id),
-            ] {
-                call = call.email_tags(
-                    MessageTag::builder()
-                        .name(name)
-                        .value(value)
-                        .build()
-                        .map_err(|_| ProviderError::InvalidRequest)?,
-                );
-            }
+            body["EmailTags"] = serde_json::json!([
+                {"Name": "hailer_message_id", "Value": correlation.hailer_message_id},
+                {"Name": "hailer_attempt_id", "Value": correlation.attempt_id},
+            ]);
         }
-        Ok(call)
+        Ok(body.to_string().into_bytes())
     }
 
     async fn send_inner(&self, request: &SendRequest) -> Result<String, ProviderError> {
-        let output = self.call(request, None)?.send().await.map_err(|error| {
-            error.as_service_error().map_or_else(
-                || {
-                    if matches!(error, SdkError::ConstructionFailure(_)) {
-                        ProviderError::InvalidRequest
-                    } else {
-                        ProviderError::Ambiguous
-                    }
-                },
-                |service| {
-                    classify(
-                        service.code(),
-                        error.raw_response().map(|response| response.status().as_u16()),
-                    )
-                },
-            )
+        let body = self.body(request, None)?;
+        let response = ses::send_email(&self.aws, body).await.map_err(|error| match error {
+            CallError::NotSent(_) => ProviderError::Transport("SES unreachable".into()),
+            CallError::Lost => ProviderError::Ambiguous,
         })?;
-        output
-            .message_id()
-            .filter(|id| !id.trim().is_empty())
-            .map(ToOwned::to_owned)
-            .ok_or(ProviderError::Ambiguous)
+        if !response.is_success() {
+            return Err(classify(response.code().as_deref(), Some(response.status)));
+        }
+        message_id(&response).ok_or(ProviderError::Ambiguous)
     }
 
     async fn dispatch_inner(
@@ -103,13 +79,14 @@ impl SesProvider {
         request: &SendRequest,
         correlation: &Correlation,
     ) -> Result<String, DispatchFailure> {
-        let call =
-            self.call(request, Some(correlation)).map_err(|_| DispatchFailure::NotDispatched)?;
-        let output = call.send().await.map_err(|error| {
-            if matches!(error, SdkError::ConstructionFailure(_)) {
-                return DispatchFailure::NotDispatched;
-            }
-            match error.as_service_error().and_then(ProvideErrorMetadata::code) {
+        let body =
+            self.body(request, Some(correlation)).map_err(|_| DispatchFailure::NotDispatched)?;
+        let response = ses::send_email(&self.aws, body).await.map_err(|error| match error {
+            CallError::NotSent(_) => DispatchFailure::NotDispatched,
+            CallError::Lost => DispatchFailure::Unknown,
+        })?;
+        if !response.is_success() {
+            return Err(match response.code().as_deref() {
                 Some("TooManyRequestsException" | "LimitExceededException") => {
                     DispatchFailure::Throttled
                 }
@@ -123,14 +100,16 @@ impl SesProvider {
                 ) => DispatchFailure::Rejected,
                 // A generic 5xx, timeout or disconnect is never retry evidence.
                 _ => DispatchFailure::Unknown,
-            }
-        })?;
-        output
-            .message_id()
-            .filter(|id| !id.trim().is_empty() && id.len() <= 256 && !id.contains('\0'))
-            .map(ToOwned::to_owned)
-            .ok_or(DispatchFailure::Unknown)
+            });
+        }
+        message_id(&response).ok_or(DispatchFailure::Unknown)
     }
+}
+
+fn message_id(response: &Response) -> Option<String> {
+    let body: serde_json::Value = response.json()?;
+    let id = body.get("MessageId")?.as_str()?;
+    (!id.trim().is_empty() && id.len() <= 256 && !id.contains('\0')).then(|| id.to_owned())
 }
 
 fn classify(code: Option<&str>, status: Option<u16>) -> ProviderError {

@@ -77,7 +77,7 @@ pub async fn run<P: QueuedProvider + 'static>(
         tasks.spawn(crate::outbound::run(provider, store.clone(), runtime.clone(), stop.clone()));
     }
     #[cfg(feature = "ses")]
-    ses::spawn(&mut tasks, &config, &store, &runtime, &stop).await;
+    ses::spawn(&mut tasks, &config, &store, &runtime, &stop).await?;
     let unexpected = tokio::select! {
         () = crate::wait_for_signal() => false,
         _ = tasks.join_next() => true,

@@ -74,6 +74,7 @@ impl RdapClient {
         let response = self
             .http
             .get(&self.bootstrap_url)
+            .header("user-agent", crate::web::USER_AGENT)
             .send_with_timeout(TIMEOUT)
             .await
             .map_err(|error| IntelError::Transport(error.to_string()))?;
@@ -116,6 +117,7 @@ impl RdapClient {
         let response = self
             .http
             .get(format!("{base}domain/{domain}"))
+            .header("user-agent", crate::web::USER_AGENT)
             .send_with_timeout(TIMEOUT)
             .await
             .map_err(|error| IntelError::Transport(error.to_string()))?;

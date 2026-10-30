@@ -4,6 +4,7 @@
 
 - Providers are cargo features: `ses` (AWS SDK) and `postmark`; platform gems build with both. A binary without the configured provider refuses to start.
 - HTTP clients (Postmark, Emailable, RDAP) moved from reqwest to rama, with rustls on ring.
+- The AWS SDK is gone: SESv2, SQS and STS go through hailer's own SigV4 client (verified against AWS's signing test suite) with env, shared-file, web identity, container and IMDSv2 credentials. The `ses` build loses 75 crates and aws-lc.
 
 - Postmark provider (`provider = "postmark"`, `[postmark] message_stream`, `POSTMARK_SERVER_TOKEN`): Rails MIME parsed into Postmark's JSON, sync and queued sends, correlation as Metadata, `hailer postmark-server` token check. SES-only settings are refused with it.
 

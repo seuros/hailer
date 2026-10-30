@@ -9,6 +9,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::aws::Aws;
 use crate::config::Config;
 use crate::control::Control;
 use crate::runtime::Runtime;
@@ -20,14 +21,14 @@ pub async fn spawn(
     store: &Store,
     runtime: &Arc<Runtime>,
     stop: &CancellationToken,
-) {
+) -> anyhow::Result<()> {
     let discovery = config.rate_limit.as_ref().filter(|rate| rate.discover_from_aws);
     if config.feedback.is_none() && discovery.is_none() && config.suppression_sync.is_none() {
-        return;
+        return Ok(());
     }
-    let aws = crate::aws_client::load_config().await;
+    let aws = Arc::new(Aws::load().await?);
     if let Some(feedback) = config.feedback.clone() {
-        let queue = crate::feedback::AwsQueue::new(&aws, feedback.queue_url.clone());
+        let queue = crate::feedback::AwsQueue::new(aws.clone(), feedback.queue_url.clone());
         let (store, runtime, stop) = (store.clone(), runtime.clone(), stop.clone());
         tasks.spawn(
             async move { crate::feedback::run(&queue, store, &feedback, &runtime, stop).await },
@@ -50,10 +51,11 @@ pub async fn spawn(
             stop.clone(),
         ));
     }
+    Ok(())
 }
 
 async fn reconcile(
-    aws: aws_config::SdkConfig,
+    aws: Arc<Aws>,
     store: Store,
     runtime: Arc<Runtime>,
     interval: Duration,
@@ -68,7 +70,7 @@ async fn reconcile(
     let mut failures = 0u8;
     loop {
         let operation = async {
-            let source = crate::suppression_sync::AwsSuppressions::new(&aws).await?;
+            let source = crate::suppression_sync::AwsSuppressions::new(aws.clone()).await?;
             crate::suppression_sync::run(&source, &store, false).await
         };
         let result = tokio::select! {
@@ -98,7 +100,7 @@ async fn reconcile(
 }
 
 async fn discover_rate(
-    aws: aws_config::SdkConfig,
+    aws: Arc<Aws>,
     control: Arc<Control>,
     interval: Duration,
     stop: CancellationToken,
@@ -109,32 +111,33 @@ async fn discover_rate(
         multiplier: 2.0,
         max_delay_ms: 30_000,
     };
-    let client = crate::aws_client::ses_client(&aws, Some(crate::aws_client::TIMEOUT));
     let mut failures = 0u8;
     loop {
-        let operation = async { client.get_account().send().await };
+        let operation = crate::aws::ses::account(&aws);
         let result = tokio::select! {
             () = stop.cancelled() => return Ok(()),
             result = operation => result,
         };
-        let delay =
-            match result.ok().and_then(|output| output.send_quota).map(|quota| quota.max_send_rate)
-            {
-                Some(rate) if rate > 0.0 => {
-                    failures = 0;
-                    if let Err(error) = control.set_rate(rate).await {
-                        warn!(%error, "could not persist discovered SES send rate");
-                    } else {
-                        info!(recipients_per_second = rate, "discovered SES send rate from AWS");
-                    }
-                    interval
+        let delay = match result
+            .ok()
+            .and_then(|account| account.send_quota)
+            .and_then(|quota| quota.max_send_rate)
+        {
+            Some(rate) if rate > 0.0 => {
+                failures = 0;
+                if let Err(error) = control.set_rate(rate).await {
+                    warn!(%error, "could not persist discovered SES send rate");
+                } else {
+                    info!(recipients_per_second = rate, "discovered SES send rate from AWS");
                 }
-                _ => {
-                    failures = failures.saturating_add(1);
-                    warn!("SES account rate discovery failed; keeping the last known rate");
-                    Duration::from_millis(backoff.calculate_delay(failures, 0.25))
-                }
-            };
+                interval
+            }
+            _ => {
+                failures = failures.saturating_add(1);
+                warn!("SES account rate discovery failed; keeping the last known rate");
+                Duration::from_millis(backoff.calculate_delay(failures, 0.25))
+            }
+        };
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
             () = tokio::time::sleep(delay) => {}

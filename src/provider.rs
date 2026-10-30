@@ -12,7 +12,7 @@ pub mod queued;
 #[cfg(feature = "ses")]
 pub mod ses;
 #[cfg(test)]
-mod test_support;
+pub mod test_support;
 pub mod verify_guard;
 
 use std::future::Future;

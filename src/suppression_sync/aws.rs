@@ -1,46 +1,60 @@
+use std::sync::Arc;
 use std::time::Duration;
 
-use aws_sdk_sesv2::error::ProvideErrorMetadata;
-use aws_sdk_sesv2::types::SuppressionListReason;
+use serde::Deserialize;
 
 use super::{Page, ReadError, Source};
+use crate::aws::{Aws, ses, sts};
 use crate::feedback::SuppressionReason;
 use crate::state::Suppression;
 
 pub struct AwsSuppressions {
-    client: aws_sdk_sesv2::Client,
+    aws: Arc<Aws>,
     scope: String,
     account: String,
     region: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListPage {
+    #[serde(default)]
+    suppressed_destination_summaries: Vec<Summary>,
+    next_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Summary {
+    email_address: String,
+    reason: String,
+    /// Epoch seconds in REST-JSON; an RFC 3339 string is accepted too.
+    last_update_time: serde_json::Value,
+}
+
 impl AwsSuppressions {
-    pub async fn new(config: &aws_config::SdkConfig) -> anyhow::Result<Self> {
-        let region = config
-            .region()
-            .ok_or_else(|| anyhow::anyhow!("AWS region is required"))?
-            .as_ref()
-            .to_owned();
-        let identity = tokio::time::timeout(
-            Duration::from_secs(30),
-            aws_sdk_sts::Client::new(config).get_caller_identity().send(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("AWS identity lookup timed out"))?
-        .map_err(|_| anyhow::anyhow!("AWS identity lookup failed"))?;
+    pub async fn new(aws: Arc<Aws>) -> anyhow::Result<Self> {
         let account =
-            identity.account().ok_or_else(|| anyhow::anyhow!("AWS account missing"))?.to_owned();
+            sts::account(&aws).await.map_err(|_| anyhow::anyhow!("AWS identity lookup failed"))?;
         anyhow::ensure!(
             account.len() == 12 && account.bytes().all(|byte| byte.is_ascii_digit()),
             "invalid AWS account"
         );
-        Ok(Self {
-            client: crate::aws_client::ses_client(config, None),
-            scope: format!("ses:{account}:{region}"),
-            account,
-            region,
-        })
+        let region = aws.region().to_owned();
+        Ok(Self { aws, scope: format!("ses:{account}:{region}"), account, region })
     }
+}
+
+fn suppressed_at(value: &serde_json::Value) -> Result<String, ReadError> {
+    let timestamp = match value {
+        serde_json::Value::Number(seconds) => seconds
+            .as_f64()
+            .and_then(|seconds| jiff::SignedDuration::try_from_secs_f64(seconds).ok())
+            .and_then(|since| jiff::Timestamp::from_duration(since).ok()),
+        serde_json::Value::String(text) => text.parse().ok(),
+        _ => None,
+    };
+    timestamp.map(|at| at.to_string()).ok_or(ReadError::InvalidPage)
 }
 
 impl Source for AwsSuppressions {
@@ -53,55 +67,42 @@ impl Source for AwsSuppressions {
     }
 
     async fn page(&self, next_token: Option<&str>) -> Result<Page, ReadError> {
-        let output = tokio::time::timeout(
-            Duration::from_secs(30),
-            self.client
-                .list_suppressed_destinations()
-                .page_size(1000)
-                .set_next_token(next_token.map(str::to_owned))
-                .send(),
-        )
-        .await
-        .map_err(|_| ReadError::Unavailable)?
-        .map_err(|error| {
-            let service = error.as_service_error();
-            if service.is_some_and(aws_sdk_sesv2::operation::list_suppressed_destinations::ListSuppressedDestinationsError::is_invalid_next_token_exception) {
-                ReadError::InvalidToken
-            } else if service.is_some_and(|error| {
-                matches!(
-                    error.code(),
-                    Some(
-                        "AccessDeniedException"
-                            | "AccessDenied"
-                            | "UnrecognizedClientException"
-                            | "InvalidClientTokenId"
-                            | "BadRequestException"
-                    )
-                )
-            }) {
-                ReadError::Rejected
-            } else {
-                ReadError::Unavailable
-            }
-        })?;
-        let records = output.suppressed_destination_summaries().iter().map(|entry| {
-            let reason = match entry.reason() {
-                SuppressionListReason::Bounce => SuppressionReason::Bounce,
-                SuppressionListReason::Complaint => SuppressionReason::Complaint,
-                _ => return Err(ReadError::InvalidPage),
-            };
-            let timestamp = entry.last_update_time();
-            let suppressed_at = jiff::Timestamp::new(timestamp.secs(), i32::try_from(timestamp.subsec_nanos()).map_err(|_| ReadError::InvalidPage)?)
-                .map_err(|_| ReadError::InvalidPage)?.to_string();
-            Ok(Suppression {
-                email_address: entry.email_address().to_owned(),
-                reason,
-                suppressed_at,
-                originating_message_id: None,
-                source_event_id: None,
-                metadata: serde_json::json!({"source": "aws_ses_account", "account_id": self.account, "region": self.region}),
+        let response = ses::suppressed_destinations(&self.aws, next_token)
+            .await
+            .map_err(|_| ReadError::Unavailable)?;
+        if !response.is_success() {
+            return Err(match response.code().as_deref() {
+                Some("InvalidNextTokenException") => ReadError::InvalidToken,
+                Some(
+                    "AccessDeniedException"
+                    | "AccessDenied"
+                    | "UnrecognizedClientException"
+                    | "InvalidClientTokenId"
+                    | "BadRequestException",
+                ) => ReadError::Rejected,
+                _ => ReadError::Unavailable,
+            });
+        }
+        let page: ListPage = response.json().ok_or(ReadError::InvalidPage)?;
+        let records = page
+            .suppressed_destination_summaries
+            .into_iter()
+            .map(|entry| {
+                let reason = match entry.reason.as_str() {
+                    "BOUNCE" => SuppressionReason::Bounce,
+                    "COMPLAINT" => SuppressionReason::Complaint,
+                    _ => return Err(ReadError::InvalidPage),
+                };
+                Ok(Suppression {
+                    email_address: entry.email_address,
+                    reason,
+                    suppressed_at: suppressed_at(&entry.last_update_time)?,
+                    originating_message_id: None,
+                    source_event_id: None,
+                    metadata: serde_json::json!({"source": "aws_ses_account", "account_id": self.account, "region": self.region}),
+                })
             })
-        }).collect::<Result<Vec<_>, ReadError>>()?;
-        Ok(Page { records, next_token: output.next_token().map(str::to_owned) })
+            .collect::<Result<Vec<_>, ReadError>>()?;
+        Ok(Page { records, next_token: page.next_token })
     }
 }

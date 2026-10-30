@@ -62,7 +62,7 @@ jobs:
         run: |
           ruby -Ilib -rhailer/version -e 'tag = ENV.fetch("RELEASE_TAG"); abort "tag/version mismatch" unless tag.empty? || tag == "v#{Hailer::VERSION}"'
           apt-get update
-          apt-get install -y --no-install-recommends cmake pkg-config libclang-dev
+          apt-get install -y --no-install-recommends pkg-config libclang-dev
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: "1.99"
