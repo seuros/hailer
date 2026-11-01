@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use super::FeedbackEvent;
 use crate::aws::Aws;
 use crate::config::FeedbackConfig;
+use crate::rogue::{Experiments, Injected, Target};
 use crate::runtime::Runtime;
 use crate::state::Store;
 
@@ -27,23 +28,35 @@ pub trait FeedbackQueue: Send + Sync {
 pub struct AwsQueue {
     aws: Arc<Aws>,
     url: String,
+    experiments: Arc<Experiments>,
 }
 
 impl AwsQueue {
-    pub const fn new(aws: Arc<Aws>, url: String) -> Self {
-        Self { aws, url }
+    pub const fn new(aws: Arc<Aws>, url: String, experiments: Arc<Experiments>) -> Self {
+        Self { aws, url, experiments }
     }
 }
 
+/// The body a garbling experiment substitutes for each received message.
+const GARBLED: &str = "rogue-garbled";
+
 impl FeedbackQueue for AwsQueue {
     async fn receive(&self) -> anyhow::Result<Vec<QueuedMessage>> {
+        let garble = match self.experiments.inject(Target::Feedback, Duration::MAX).await {
+            Injected::Raise | Injected::TimedOut => {
+                anyhow::bail!("SQS receive failed (rogue experiment)")
+            }
+            Injected::Garble(_) => true,
+            Injected::Pass(_) => false,
+        };
         crate::aws::sqs::receive(&self.aws, &self.url)
             .await?
             .into_iter()
             .map(|message| {
+                let body = message.body.context("SQS message missing body")?;
                 Ok(QueuedMessage {
                     receipt: message.receipt_handle.context("SQS message missing receipt")?,
-                    body: message.body.context("SQS message missing body")?,
+                    body: if garble { GARBLED.to_owned() } else { body },
                 })
             })
             .collect()

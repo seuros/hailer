@@ -23,6 +23,7 @@ compile_error!("hailer needs a mail provider: build with --features ses, postmar
 #[cfg(feature = "ses")]
 mod aws;
 mod bay;
+mod budget;
 mod config;
 mod control;
 mod domain_block;
@@ -32,6 +33,7 @@ mod mail;
 mod operator_cli;
 mod outbound;
 mod provider;
+mod rogue;
 mod runtime;
 mod state;
 mod supervisor;
@@ -108,6 +110,12 @@ enum Command {
     SesIdentities(SesIdentitiesArgs),
     /// Check the Postmark server token and name the server it belongs to
     PostmarkServer,
+    /// Arm a fault-injection experiment on every replica with [rogue]; it disarms itself on expiry
+    ArmExperiment(ArmArgs),
+    /// Disarm one target's experiment, or every experiment without --target
+    DisarmExperiment(DisarmArgs),
+    /// List the experiments still armed and the time each has left
+    ListExperiments,
 }
 
 #[derive(usage_rs::Args, Debug)]
@@ -178,6 +186,32 @@ struct BatchStatusArgs {
     /// How long a cached verdict stays fresh once this batch completes
     #[usage(long, default = "604800")]
     cache_ttl_seconds: u64,
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct ArmArgs {
+    /// provider, feedback or verifier
+    #[usage(long)]
+    target: String,
+    /// raise, delay or garble (garble is not available for verifier)
+    #[usage(long)]
+    fault: String,
+    /// How much longer each affected call takes; delay only
+    #[usage(long)]
+    delay_ms: Option<u64>,
+    /// Share of calls affected
+    #[usage(long, default = "100")]
+    percent: f64,
+    /// Seconds until the experiment disarms itself, at most 86400
+    #[usage(long)]
+    expires_in_seconds: u64,
+}
+
+#[derive(usage_rs::Args, Debug)]
+struct DisarmArgs {
+    /// provider, feedback or verifier; every target when omitted
+    #[usage(long)]
+    target: Option<String>,
 }
 
 #[derive(usage_rs::Args, Debug)]
@@ -253,6 +287,15 @@ async fn main() -> anyhow::Result<()> {
         "Starting hailer"
     );
 
+    dock(docking, config, store).await?;
+
+    info!("hailer stopped");
+    Ok(())
+}
+
+/// Docks with Mothership and serves through the configured provider until
+/// shutdown.
+async fn dock(docking: DockingConfig, config: Config, store: state::Store) -> anyhow::Result<()> {
     let control = Arc::new(
         control::Control::new(
             store.pool.clone(),
@@ -263,24 +306,27 @@ async fn main() -> anyhow::Result<()> {
     );
     let verifier = Arc::new(build_verifier(config.email_verification.as_ref())?);
     let intel = Arc::new(build_intel(config.domain_intel.as_ref()));
+    let experiments = Arc::new(rogue::Experiments::default());
     match config.provider {
         #[cfg(feature = "ses")]
         config::ProviderKind::Ses => {
             let aws = Arc::new(aws::Aws::load().await?);
-            let provider = Arc::new(SesProvider::new(aws, config.ses_configuration_set.as_deref()));
-            supervisor::run(docking, config, provider, store, control, verifier, intel).await?;
+            let provider = Arc::new(
+                SesProvider::new(aws, config.ses_configuration_set.as_deref())
+                    .with_experiments(experiments.clone()),
+            );
+            supervisor::run(docking, config, provider, store, control, verifier, intel, experiments)
+                .await
         }
         #[cfg(feature = "postmark")]
         config::ProviderKind::Postmark => {
-            let provider = Arc::new(postmark(&config)?);
-            supervisor::run(docking, config, provider, store, control, verifier, intel).await?;
+            let provider = Arc::new(postmark(&config)?.with_experiments(experiments.clone()));
+            supervisor::run(docking, config, provider, store, control, verifier, intel, experiments)
+                .await
         }
         #[cfg(not(all(feature = "ses", feature = "postmark")))]
-        missing => return Err(ConfigError::MissingFeature(missing.feature()).into()),
+        missing => Err(ConfigError::MissingFeature(missing.feature()).into()),
     }
-
-    info!("hailer stopped");
-    Ok(())
 }
 
 /// The commands that talk to a provider; `false` when `command` is not one.

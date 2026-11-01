@@ -17,11 +17,14 @@ pub mod verify_guard;
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use breaker_machines::{AsyncCircuitBreaker, CircuitError, PredicateClassifier};
+use deadline_machines::Deadline;
 use thiserror::Error;
 
 use crate::mail::SendRequest;
+use crate::rogue::{Experiments, Injected, Target};
 use queued::{DispatchFailure, DispatchOutcome};
 
 /// A failure is not a promise that retrying a send is safe.
@@ -43,6 +46,8 @@ pub enum ProviderError {
     Ambiguous,
     #[error("local recipient rate limit exceeded")]
     RateLimited,
+    #[error("request budget spent before dispatch; nothing was sent")]
+    BudgetSpent,
 }
 
 impl ProviderError {
@@ -53,7 +58,7 @@ impl ProviderError {
             | Self::NoRecipients
             | Self::Suppressed => 422,
             Self::Rejected(_) => 502,
-            Self::Transport(_) | Self::Ambiguous => 503,
+            Self::Transport(_) | Self::Ambiguous | Self::BudgetSpent => 503,
             Self::RateLimited => 429,
         }
     }
@@ -62,6 +67,7 @@ impl ProviderError {
         match self {
             Self::Ambiguous => Some("outcome_unknown"),
             Self::RateLimited => Some("rate_limited"),
+            Self::BudgetSpent => Some("budget_spent"),
             _ => None,
         }
     }
@@ -80,6 +86,7 @@ pub trait MailProvider: Send + Sync {
     fn send(
         &self,
         request: &SendRequest,
+        deadline: Deadline,
     ) -> impl Future<Output = Result<String, ProviderError>> + Send;
 
     fn circuit_state(&self) -> &'static str {
@@ -87,17 +94,34 @@ pub trait MailProvider: Send + Sync {
     }
 }
 
+/// Less budget than this and a send is refused instead of started.
+pub const SEND_FLOOR: Duration = Duration::from_secs(2);
+
+/// A provider id that a garbling experiment reported instead of the real one.
+fn garble(id: &str) -> String {
+    format!("rogue-{id}")
+}
+
+/// The timeout a send gets under `deadline`, at most `cap`.
+fn send_timeout(deadline: Deadline, cap: Duration) -> Result<Duration, ProviderError> {
+    crate::budget::within(deadline, SEND_FLOOR, cap).ok_or(ProviderError::BudgetSpent)
+}
+
 /// The breaker every provider sends through. Only transport failures and
-/// unknown outcomes count; a rejection or invalid input never trips it.
+/// unknown outcomes count; a rejection or invalid input never trips it. An
+/// armed [`Target::Provider`] experiment runs inside it, so injected faults
+/// reach the breaker the way real ones do.
 struct SendCircuit {
     breaker: AsyncCircuitBreaker,
     provider: &'static str,
+    experiments: Arc<Experiments>,
 }
 
 impl SendCircuit {
     fn new(name: &'static str, provider: &'static str) -> Self {
         Self {
             provider,
+            experiments: Arc::default(),
             breaker: AsyncCircuitBreaker::builder(name)
                 .failure_threshold(5)
                 .failure_window_secs(30.0)
@@ -118,12 +142,23 @@ impl SendCircuit {
         }
     }
 
-    async fn send<F, Fut>(&self, call: F) -> Result<String, ProviderError>
+    async fn send<F, Fut>(&self, timeout: Duration, call: F) -> Result<String, ProviderError>
     where
-        F: FnOnce() -> Fut,
+        F: FnOnce(Duration) -> Fut,
         Fut: Future<Output = Result<String, ProviderError>>,
     {
-        match self.breaker.call(call).await {
+        let attempt = || async move {
+            match self.experiments.inject(Target::Provider, timeout).await {
+                Injected::Pass(left) => call(left).await,
+                Injected::Garble(left) => call(left).await.map(|id| garble(&id)),
+                Injected::Raise => Err(ProviderError::Transport(format!(
+                    "{} unreachable (rogue experiment)",
+                    self.provider
+                ))),
+                Injected::TimedOut => Err(ProviderError::Ambiguous),
+            }
+        };
+        match self.breaker.call(attempt).await {
             Ok(id) => Ok(id),
             Err(CircuitError::Execution(error)) => Err(error),
             Err(_) => {
@@ -132,12 +167,20 @@ impl SendCircuit {
         }
     }
 
-    async fn dispatch<F, Fut>(&self, call: F) -> DispatchOutcome
+    async fn dispatch<F, Fut>(&self, timeout: Duration, call: F) -> DispatchOutcome
     where
-        F: FnOnce() -> Fut,
+        F: FnOnce(Duration) -> Fut,
         Fut: Future<Output = Result<String, DispatchFailure>>,
     {
-        match self.breaker.call(call).await {
+        let attempt = || async move {
+            match self.experiments.inject(Target::Provider, timeout).await {
+                Injected::Pass(left) => call(left).await,
+                Injected::Garble(left) => call(left).await.map(|id| garble(&id)),
+                Injected::Raise => Err(DispatchFailure::NotDispatched),
+                Injected::TimedOut => Err(DispatchFailure::Unknown),
+            }
+        };
+        match self.breaker.call(attempt).await {
             Ok(id) => DispatchOutcome::Accepted(id),
             Err(CircuitError::Execution(error)) => error.outcome(),
             Err(_) => DispatchOutcome::NotDispatched("provider_circuit_busy"),

@@ -9,6 +9,8 @@ use tokio::io::{DuplexStream, duplex};
 use super::*;
 use crate::provider::ProviderError;
 
+const LINK_BUDGET: Duration = Duration::from_mins(1);
+
 const RUBY_REQUEST: &[u8] = include_bytes!("../../../test/fixtures/send_request.json");
 
 #[derive(Clone, Copy)]
@@ -38,6 +40,7 @@ impl MailProvider for FakeProvider {
     fn send(
         &self,
         request: &SendRequest,
+        _: Deadline,
     ) -> impl std::future::Future<Output = Result<String, ProviderError>> + Send {
         self.requests.lock().expect("request lock").push(request.clone());
         std::future::ready(match self.outcome {
@@ -57,7 +60,8 @@ impl MailProvider for FakeProvider {
 async fn ruby_request_reaches_the_provider_without_rewriting_mail_or_envelopes() {
     let fake = FakeProvider::new(Outcome::Accepted);
     let provider = fake.clone();
-    let (status, body) = handle(b"POST", SEND_PATH.as_bytes(), RUBY_REQUEST, &provider).await;
+    let (status, body) =
+        handle(b"POST", SEND_PATH.as_bytes(), RUBY_REQUEST, &provider, Deadline::never()).await;
     assert_eq!(status, 200);
     assert_eq!(
         serde_json::from_slice::<Value>(&body).expect("success JSON"),
@@ -80,7 +84,8 @@ async fn malformed_requests_never_call_the_provider() {
     let fake = FakeProvider::new(Outcome::Accepted);
     let provider = fake.clone();
     for body in [b"not json".as_slice(), b"{}", br#"{"raw_mime":7}"#] {
-        let (status, response) = handle(b"POST", SEND_PATH.as_bytes(), body, &provider).await;
+        let (status, response) =
+            handle(b"POST", SEND_PATH.as_bytes(), body, &provider, Deadline::never()).await;
         assert_eq!(status, 400);
         let error: Value = serde_json::from_slice(&response).expect("error JSON");
         assert!(error["error"].is_string());
@@ -93,7 +98,7 @@ async fn unrelated_routes_never_send_mail() {
     let fake = FakeProvider::new(Outcome::Accepted);
     let provider = fake.clone();
     for (method, path) in [(b"GET".as_slice(), SEND_PATH.as_bytes()), (b"POST", b"/other")] {
-        let (status, _) = handle(method, path, RUBY_REQUEST, &provider).await;
+        let (status, _) = handle(method, path, RUBY_REQUEST, &provider, Deadline::never()).await;
         assert_eq!(status, 404);
     }
     assert!(fake.requests.lock().expect("request lock").is_empty());
@@ -111,7 +116,8 @@ async fn provider_failures_use_the_statuses_the_gem_understands() {
         (Outcome::RateLimited, 429),
     ] {
         let provider = FakeProvider::new(outcome);
-        let (status, body) = handle(b"POST", SEND_PATH.as_bytes(), RUBY_REQUEST, &provider).await;
+        let (status, body) =
+            handle(b"POST", SEND_PATH.as_bytes(), RUBY_REQUEST, &provider, Deadline::never()).await;
         assert_eq!(status, expected_status);
         let error: Value = serde_json::from_slice(&body).expect("error JSON");
         assert_ne!(error["error"].as_str().expect("error string"), "");
@@ -222,6 +228,7 @@ async fn queued_protocol_commits_before_acceptance_without_calling_the_provider(
         provider.clone(),
         store.clone(),
         runtime.clone(),
+        LINK_BUDGET,
         stop.clone(),
     ));
     let mut command: Value = serde_json::from_slice(RUBY_REQUEST).expect("fixture");
@@ -370,6 +377,7 @@ async fn chunked_docking_requests_return_acceptance_and_reuse_the_link() {
             provider,
             store,
             link_runtime,
+            LINK_BUDGET,
             CancellationToken::new(),
         ));
         let mut replies = BytesMut::new();
@@ -398,10 +406,17 @@ async fn mismatched_body_request_id_closes_the_link_without_sending() {
     let database = crate::test_support::database().await;
     let store = crate::state::Store::connect(database.url(), 5).await.expect("state");
     let link_runtime = runtime(true, store.pool.clone()).await;
-    let error =
-        serve_link(ship, BytesMut::new(), provider, store, link_runtime, CancellationToken::new())
-            .await
-            .expect_err("wrong request id");
+    let error = serve_link(
+        ship,
+        BytesMut::new(),
+        provider,
+        store,
+        link_runtime,
+        LINK_BUDGET,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("wrong request id");
     assert!(error.to_string().contains("does not match"));
     assert!(fake.requests.lock().expect("request lock").is_empty());
 }
@@ -419,6 +434,7 @@ async fn private_health_and_readiness_report_bootstrap_over_the_real_protocol() 
         FakeProvider::new(Outcome::Accepted),
         store,
         runtime.clone(),
+        LINK_BUDGET,
         stop.clone(),
     ));
     let mut pending = BytesMut::new();
@@ -451,7 +467,7 @@ struct DelayedProvider {
 }
 
 impl MailProvider for DelayedProvider {
-    async fn send(&self, _: &SendRequest) -> Result<String, ProviderError> {
+    async fn send(&self, _: &SendRequest, _: Deadline) -> Result<String, ProviderError> {
         self.started.notify_one();
         self.finish.notified().await;
         Ok("ses-test-id".into())
@@ -475,6 +491,7 @@ async fn cancellation_drains_an_in_flight_send_instead_of_losing_its_response() 
         provider.clone(),
         store,
         runtime.clone(),
+        LINK_BUDGET,
         stop.clone(),
     ));
     client.write_all(&request_frames(1)).await.expect("request");

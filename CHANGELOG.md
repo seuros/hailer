@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Background workers restart one at a time under `supervisor-machines` (1 s doubling to 30 s; more than 3 restarts in 60 s still drains and exits). A panicking SQS consumer no longer takes the docking links and in-flight sends down with it.
+- Synchronous sends run on one `deadline-machines` budget taken from Mothership's `MS_BAY_DRAIN_TIMEOUT`: verification and the provider call share it, and with under 2 s left the answer is 503 `budget_spent` with nothing sent, instead of a provider call Mothership has already abandoned.
+- Opt-in fault injection (`[rogue]`, `rogue-machines`): `hailer arm-experiment`/`disarm-experiment`/`list-experiments` against the provider, SQS feedback or the verifier, with a mandatory expiry of at most 24 hours. Migration `06_rogue_experiments`.
+- breaker-machines 0.21, chrono-machines 0.10, throttle-machines 0.4, state-machines 0.33 (the release breaker-machines 0.21 builds on, so one copy is compiled).
+
 ## 0.7.1
 
 - `AWS_ENDPOINT_URL`, and `AWS_ENDPOINT_URL_SESV2`/`_SQS`/`_STS` before it, replace the AWS hosts again, as they did under the AWS SDK; `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true` turns them off. 0.7.0 ignored them, so LocalStack and endpoint fixtures reached real AWS.

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use deadline_machines::Deadline;
 use sqlx::types::Json;
 use tokio_util::sync::CancellationToken;
 
@@ -626,6 +627,7 @@ impl MailProvider for Probe {
     fn send(
         &self,
         _: &SendRequest,
+        _: Deadline,
     ) -> impl std::future::Future<Output = Result<String, ProviderError>> + Send {
         std::future::ready(Err(ProviderError::InvalidRequest))
     }

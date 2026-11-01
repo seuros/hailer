@@ -237,3 +237,37 @@ async fn shutdown_finishes_the_current_commit_and_ack_but_leaves_the_batch_tail(
     assert!(queue.acknowledged.load(Ordering::SeqCst));
     assert_eq!(runtime.health(true, "closed").feedback_acknowledged, 1);
 }
+
+#[cfg(feature = "ses")]
+#[tokio::test]
+async fn garbled_feedback_keeps_receipts_and_raised_feedback_receives_nothing() {
+    use std::sync::Arc;
+
+    use rogue_machines::{Fault, Fraction};
+
+    use crate::aws::{Aws, Credentials};
+    use crate::provider::test_support::endpoint;
+    use crate::rogue::{Armed, Experiments, Target};
+
+    let server =
+        endpoint(200, r#"{"Messages":[{"ReceiptHandle":"r-1","Body":"real"}]}"#, false).await;
+    let queue = |fault| {
+        let experiments = Arc::new(Experiments::default());
+        let remaining = std::time::Duration::from_secs(60);
+        experiments.apply(&[Armed {
+            target: Target::Feedback,
+            fault,
+            fraction: Fraction::ALL,
+            remaining,
+        }]);
+        let credentials =
+            Credentials::new("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", None);
+        let aws = Arc::new(Aws::fixed(&server.url, "us-east-1", credentials));
+        AwsQueue::new(aws, server.url.clone(), experiments)
+    };
+    let received = queue(Fault::Garble).receive().await.expect("received");
+    assert_eq!((received[0].receipt.as_str(), received[0].body.as_str()), ("r-1", "rogue-garbled"));
+    assert!(queue(Fault::Raise).receive().await.is_err());
+    assert_eq!(server.calls(), 1);
+    server.stop().await;
+}

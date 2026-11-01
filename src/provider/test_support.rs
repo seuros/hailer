@@ -1,5 +1,7 @@
 use std::sync::Mutex;
 
+use deadline_machines::Deadline;
+
 use crate::mail::SendRequest;
 use crate::provider::{MailProvider, ProviderError};
 
@@ -24,6 +26,7 @@ impl MailProvider for FakeSender {
     fn send(
         &self,
         request: &SendRequest,
+        _: Deadline,
     ) -> impl std::future::Future<Output = Result<String, ProviderError>> + Send {
         self.0.lock().expect("requests").push(request.clone());
         std::future::ready(Ok("ses-id".into()))

@@ -24,9 +24,14 @@ fn call(method: &'static str, path: String, query: Vec<(String, String)>, body: 
     }
 }
 
-/// `SendEmail`; the caller classifies the answer.
-pub async fn send_email(aws: &Aws, body: Vec<u8>) -> Result<Response, CallError> {
-    aws.call(call("POST", "/v2/email/outbound-emails".into(), vec![], body)).await
+/// `SendEmail` within `timeout`; the caller classifies the answer.
+pub async fn send_email(
+    aws: &Aws,
+    body: Vec<u8>,
+    timeout: Duration,
+) -> Result<Response, CallError> {
+    let call = Call { timeout, ..call("POST", "/v2/email/outbound-emails".into(), vec![], body) };
+    aws.call(call).await
 }
 
 /// One `ListSuppressedDestinations` page; the caller classifies the answer.

@@ -9,7 +9,7 @@ async fn an_operator_banned_domain_is_dropped_and_mime_is_unchanged() {
     let sender = Arc::new(FakeSender::default());
     let guard = DomainBlockGuard { inner: sender.clone(), store };
     let original = request_to(&["good@example.com", "spammer@guerrillamail.com"]);
-    guard.send(&original).await.expect("send");
+    guard.send(&original, Deadline::never()).await.expect("send");
     let sent = sender.sent();
     assert_eq!(sent[0].to_addresses, ["good@example.com"]);
     assert_eq!(sent[0].raw_mime, original.raw_mime);
@@ -22,8 +22,10 @@ async fn a_suffix_glob_blocks_the_whole_tld() {
     store.ban_domain("*.kp", Some("sanctioned")).await.expect("ban");
     let sender = Arc::new(FakeSender::default());
     let guard = DomainBlockGuard { inner: sender.clone(), store };
-    let error =
-        guard.send(&request_to(&["someone@mail.example.kp"])).await.expect_err("should reject");
+    let error = guard
+        .send(&request_to(&["someone@mail.example.kp"]), Deadline::never())
+        .await
+        .expect_err("should reject");
     assert!(matches!(error, ProviderError::Suppressed));
     assert!(sender.sent().is_empty());
 }
@@ -36,7 +38,7 @@ async fn unbanning_an_operator_pattern_lets_mail_through_again() {
     assert!(store.unban_domain("example.com").await.expect("unban"));
     let sender = Arc::new(FakeSender::default());
     let guard = DomainBlockGuard { inner: sender.clone(), store };
-    guard.send(&request_to(&["alice@example.com"])).await.expect("send");
+    guard.send(&request_to(&["alice@example.com"]), Deadline::never()).await.expect("send");
     assert_eq!(sender.sent()[0].to_addresses, ["alice@example.com"]);
 }
 
@@ -49,8 +51,10 @@ async fn unbanning_a_curated_pattern_is_a_no_op() {
     assert!(!store.unban_domain("guerrillamail.com").await.expect("unban attempt"));
     let sender = Arc::new(FakeSender::default());
     let guard = DomainBlockGuard { inner: sender.clone(), store };
-    let error =
-        guard.send(&request_to(&["spammer@guerrillamail.com"])).await.expect_err("still blocked");
+    let error = guard
+        .send(&request_to(&["spammer@guerrillamail.com"]), Deadline::never())
+        .await
+        .expect_err("still blocked");
     assert!(matches!(error, ProviderError::Suppressed));
 }
 
@@ -60,6 +64,6 @@ async fn an_unlisted_domain_passes_through() {
     let store = Store::connect(database.url(), 5).await.expect("state");
     let sender = Arc::new(FakeSender::default());
     let guard = DomainBlockGuard { inner: sender.clone(), store };
-    guard.send(&request_to(&["alice@example.com"])).await.expect("send");
+    guard.send(&request_to(&["alice@example.com"]), Deadline::never()).await.expect("send");
     assert_eq!(sender.sent().len(), 1);
 }

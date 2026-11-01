@@ -1,6 +1,7 @@
 use std::assert_matches;
 
 use super::*;
+use crate::provider::SEND_FLOOR;
 use crate::provider::test_support::{Endpoint, correlation, endpoint, request};
 
 const ACCEPTED: &str = r#"{"To":"bob@example.dev","SubmittedAt":"2026-10-29T10:00:00Z","MessageID":"0a129aee-e1cd-480d-b08d-4f48548ff48d","ErrorCode":0,"Message":"OK"}"#;
@@ -22,7 +23,7 @@ async fn fixture(
 async fn an_accepted_send_returns_postmarks_message_id() {
     let (provider, server) = fixture(200, ACCEPTED, false).await;
     assert_eq!(
-        provider.send(&request()).await.expect("accepted"),
+        provider.send(&request(), Deadline::never()).await.expect("accepted"),
         "0a129aee-e1cd-480d-b08d-4f48548ff48d"
     );
     assert_eq!(server.calls(), 1);
@@ -83,14 +84,18 @@ async fn postmarks_answers_are_read_from_the_wire() {
         (500, "oops", false, Answer::Refused { status: 500, code: None }),
     ] {
         let (provider, server) = fixture(status, body, disconnect).await;
-        assert_eq!(provider.post(b"{}".to_vec()).await, answer, "{status} {body:?} {disconnect}");
+        assert_eq!(
+            provider.post(b"{}".to_vec(), TIMEOUT).await,
+            answer,
+            "{status} {body:?} {disconnect}"
+        );
         server.stop().await;
     }
 
     let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let url = format!("http://{}", closed.local_addr().expect("address"));
     drop(closed);
-    assert_eq!(provider(url).post(b"{}".to_vec()).await, Answer::Unsent);
+    assert_eq!(provider(url).post(b"{}".to_vec(), TIMEOUT).await, Answer::Unsent);
 }
 
 #[test]
@@ -152,7 +157,7 @@ async fn invalid_messages_never_reach_postmark() {
     no_body.raw_mime =
         "From: alice@example.dev\r\nTo: bob@example.dev\r\nContent-Type: image/png\r\n\r\nx".into();
     for invalid in [invalid_address, no_body] {
-        assert!(provider.send(&invalid).await.is_err());
+        assert!(provider.send(&invalid, Deadline::never()).await.is_err());
         assert_eq!(
             provider.dispatch(&invalid, &correlation()).await,
             DispatchOutcome::NotAccepted { code: "invalid_message", retryable: false }
@@ -176,7 +181,10 @@ async fn rejections_leave_the_circuit_closed_and_outages_open_it() {
     )
     .await;
     for _ in 0..8 {
-        assert_matches!(provider.send(&request()).await, Err(ProviderError::Rejected(_)));
+        assert_matches!(
+            provider.send(&request(), Deadline::never()).await,
+            Err(ProviderError::Rejected(_))
+        );
     }
     assert_eq!(server.calls(), 8);
     assert_eq!(provider.circuit_state(), "closed");
@@ -184,7 +192,7 @@ async fn rejections_leave_the_circuit_closed_and_outages_open_it() {
 
     let (provider, server) = fixture(503, r#"{"ErrorCode":100}"#, false).await;
     for _ in 0..8 {
-        assert!(provider.send(&request()).await.is_err());
+        assert!(provider.send(&request(), Deadline::never()).await.is_err());
     }
     assert_eq!(server.calls(), 5);
     assert_eq!(provider.circuit_state(), "open");
@@ -305,7 +313,7 @@ async fn live_postmark_delivers_a_rails_shaped_message() {
     let server = provider.server().await.expect("token names a server");
     eprintln!("server: {} ({})", server.name, server.id);
     let request = envelope(rails_shaped(&from, &to, stamp), &[&to], bcc);
-    let id = provider.send(&request).await.expect("sync send accepted");
+    let id = provider.send(&request, Deadline::never()).await.expect("sync send accepted");
     eprintln!("sync send to {to}: {id}");
     let queued = envelope(rails_shaped(&from, BLACK_HOLE, stamp), &[BLACK_HOLE], &[]);
     let outcome = provider.dispatch(&queued, &correlation()).await;
@@ -327,7 +335,10 @@ async fn live_postmark_refusals_map_to_outcomes() {
         "00000000-0000-0000-0000-000000000000".into(),
         &PostmarkConfig::default(),
     );
-    assert_matches!(wrong.send(&message).await, Err(ProviderError::Transport(_)));
+    assert_matches!(
+        wrong.send(&message, Deadline::never()).await,
+        Err(ProviderError::Transport(_))
+    );
     assert_eq!(
         wrong.dispatch(&message, &correlation()).await,
         DispatchOutcome::NotAccepted { code: "provider_unauthorized", retryable: true }
@@ -337,12 +348,12 @@ async fn live_postmark_refusals_map_to_outcomes() {
         token,
         &PostmarkConfig { message_stream: "hailer-no-such-stream".into() },
     );
-    let error = missing_stream.send(&message).await.expect_err("unknown stream");
+    let error = missing_stream.send(&message, Deadline::never()).await.expect_err("unknown stream");
     eprintln!("missing stream: {error}");
     assert_matches!(error, ProviderError::Rejected(_));
 
     let stranger = plain("nobody@hailer.invalid", &[BLACK_HOLE], "hailer refusal check");
-    let error = provider.send(&stranger).await.expect_err("unverified sender");
+    let error = provider.send(&stranger, Deadline::never()).await.expect_err("unverified sender");
     eprintln!("unverified sender: {error}");
     assert_matches!(error, ProviderError::Rejected(_));
 
@@ -351,7 +362,7 @@ async fn live_postmark_refusals_map_to_outcomes() {
     let inactive = plain(&from, &[HARD_BOUNCE], "hailer inactive check");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     loop {
-        match provider.send(&inactive).await {
+        match provider.send(&inactive, Deadline::never()).await {
             Err(ProviderError::Suppressed) => break,
             Ok(id) => eprintln!("accepted {id}; bounce not recorded yet"),
             Err(other) => panic!("inactive recipient: {other}"),
@@ -365,6 +376,16 @@ async fn live_postmark_refusals_map_to_outcomes() {
     );
 
     let mixed = plain(&from, &[HARD_BOUNCE, BLACK_HOLE], "hailer partial check");
-    let id = provider.send(&mixed).await.expect("accepted for the active recipient");
+    let id =
+        provider.send(&mixed, Deadline::never()).await.expect("accepted for the active recipient");
     eprintln!("mixed recipients accepted: {id}");
+}
+
+#[tokio::test]
+async fn a_budget_below_the_send_floor_refuses_without_calling_postmark() {
+    let (provider, server) = fixture(200, ACCEPTED, false).await;
+    let spent = crate::budget::after(SEND_FLOOR.saturating_sub(Duration::from_millis(1)));
+    assert_matches!(provider.send(&request(), spent).await, Err(ProviderError::BudgetSpent));
+    assert_eq!(server.calls(), 0);
+    server.stop().await;
 }

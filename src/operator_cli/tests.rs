@@ -72,3 +72,33 @@ async fn an_expired_cached_verdict_is_resubmitted_not_skipped() {
     assert_eq!(to_submit, ["expired@example.dev"]);
     assert_eq!(report.already_cached, 0);
 }
+
+fn arm(target: &str, fault: &str, delay_ms: Option<u64>, percent: f64, expires: u64) -> ArmArgs {
+    ArmArgs {
+        target: target.into(),
+        fault: fault.into(),
+        delay_ms,
+        percent,
+        expires_in_seconds: expires,
+    }
+}
+
+#[test]
+fn arming_from_the_cli_requires_a_bounded_expiry_and_a_fault_the_target_supports() {
+    let delay = experiment(&arm("provider", "delay", Some(250), 0.01, 300)).expect("delay");
+    assert_eq!(delay.fault, Fault::Delay { ns: crate::budget::nanos(Duration::from_millis(250)) });
+    assert_eq!(delay.fraction.millionths(), 100);
+    assert_eq!(delay.remaining, Duration::from_secs(300));
+    for invalid in [
+        arm("verifier", "garble", None, 100.0, 300),
+        arm("provider", "delay", None, 100.0, 300),
+        arm("provider", "raise", Some(5), 100.0, 300),
+        arm("provider", "raise", None, 0.0, 300),
+        arm("provider", "raise", None, 100.5, 300),
+        arm("provider", "raise", None, 100.0, 0),
+        arm("provider", "raise", None, 100.0, 86_401),
+        arm("database", "raise", None, 100.0, 300),
+    ] {
+        assert!(experiment(&invalid).is_err(), "{invalid:?}");
+    }
+}

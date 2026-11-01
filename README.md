@@ -312,6 +312,13 @@ the current feedback commit/ack within the configured deadline. Idle links
 close immediately. Deadline expiry aborts remaining tasks and exits nonzero;
 an interrupted send can have an unknown outcome.
 
+Background workers (dispatcher, SQS feedback, rate discovery, suppression
+reconciliation, rogue watcher) run under an OTP-style supervisor
+(`supervisor-machines`): a worker that panics or exits is restarted on its
+own, after 1 s doubling to 30 s while it keeps dying. More than 3 restarts in
+60 s, or the docking listener stopping, drains the whole ship and exits
+nonzero for Mothership to relaunch.
+
 **Security:** the route currently has no application-level authentication.
 `/internal/` is a name, not an access control. Keep the bind private. The client
 does not follow redirects or use environment HTTP proxies.
@@ -462,6 +469,40 @@ an automatic retry of an ambiguous send.
 Postmark sends are single-attempt too: throttling, a refused token and 5xx
 return 503, other refusals 502, and lost or unreadable answers the
 unknown-outcome code.
+
+Every synchronous send runs on one budget (`deadline-machines`): Mothership's
+`request_timeout` for the bay, read from `MS_BAY_DRAIN_TIMEOUT` (60 s when
+unset), less one second to write the reply. It starts when the request
+arrives; address verification and the provider call draw from what is left. Verification never
+spends the last 5 s, and a lookup that cannot finish in what is left counts as
+`unknown`. The provider call's timeout is cut to the remaining budget; with
+under 2 s left nothing is sent and the answer is 503 `code: "budget_spent"`
+(`Hailer::UnavailableError`, safe to retry). Queued dispatch keeps the
+provider's own 20 s timeout.
+
+## Fault injection
+
+`rogue-machines` lets an operator make a dependency fail, stall or lie on
+purpose, to watch the breaker, the budgets and the Rails side react. Nothing
+happens unless `[rogue]` is configured; replicas with it poll
+`hailer.rogue_experiments` every `poll_interval_seconds` (default 5).
+
+```sh
+hailer arm-experiment --target provider --fault raise --percent 10 --expires-in-seconds 300
+hailer arm-experiment --target verifier --fault delay --delay-ms 4000 --expires-in-seconds 600
+hailer list-experiments
+hailer disarm-experiment --target provider   # or no --target to disarm everything
+```
+
+One experiment per target; arming again replaces it. Every experiment expires,
+at most 24 hours after arming, and the expiry is counted down on each host's
+monotonic clock from the time PostgreSQL says is left.
+
+| Target | `raise` | `delay` | `garble` |
+| --- | --- | --- | --- |
+| `provider` (SES/Postmark) | unreachable: nothing sent; sync sends answer 503 and count against the breaker, queued dispatch retries | served inside the send timeout; at least as long is an unknown outcome (queued: `held_unknown`) | sent, but the id comes back as `rogue-<id>` |
+| `feedback` (SQS) | receive fails, consumer backs off | receive starts late | bodies replaced and left unacknowledged, so SQS redelivers them |
+| `verifier` (Emailable) | lookup fails open as `unknown` | served inside the lookup budget | refused: a garbled verdict would be cached past the experiment |
 
 ## Status
 

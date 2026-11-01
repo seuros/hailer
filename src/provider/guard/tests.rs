@@ -28,7 +28,7 @@ async fn only_suppressed_envelope_recipients_are_removed_and_mime_is_unchanged()
     let control = open_control(&store).await;
     let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let original = request();
-    assert_eq!(guard.send(&original).await.expect("send"), "ses-id");
+    assert_eq!(guard.send(&original, Deadline::never()).await.expect("send"), "ses-id");
     let sent = sender.sent();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].to_addresses, Vec::<String>::new());
@@ -48,7 +48,7 @@ async fn all_suppressed_recipients_never_reach_the_provider() {
     let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let mut message = request();
     message.cc_addresses.clear();
-    assert_matches!(guard.send(&message).await, Err(ProviderError::Suppressed));
+    assert_matches!(guard.send(&message, Deadline::never()).await, Err(ProviderError::Suppressed));
     assert!(sender.sent().is_empty());
 }
 
@@ -60,7 +60,7 @@ async fn unsuppressed_messages_keep_their_original_envelopes() {
     let control = open_control(&store).await;
     let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let message = request();
-    guard.send(&message).await.expect("send");
+    guard.send(&message, Deadline::never()).await.expect("send");
     let sent = sender.sent();
     assert_eq!(sent[0].to_addresses, message.to_addresses);
     assert_eq!(sent[0].cc_addresses, message.cc_addresses);
@@ -88,12 +88,21 @@ async fn bootstrap_drain_storage_loss_and_rate_denials_never_call_the_sender() {
     );
     let guard =
         SuppressionGuard { inner: sender.clone(), store: store.clone(), control: control.clone() };
-    assert_matches!(guard.send(&request()).await, Err(ProviderError::Transport(_)));
+    assert_matches!(
+        guard.send(&request(), Deadline::never()).await,
+        Err(ProviderError::Transport(_))
+    );
     control.bootstrap_done();
-    guard.send(&request()).await.expect("one admitted message");
-    assert_matches!(guard.send(&request()).await, Err(ProviderError::RateLimited));
+    guard.send(&request(), Deadline::never()).await.expect("one admitted message");
+    assert_matches!(
+        guard.send(&request(), Deadline::never()).await,
+        Err(ProviderError::RateLimited)
+    );
     control.drain();
-    assert_matches!(guard.send(&request()).await, Err(ProviderError::Transport(_)));
+    assert_matches!(
+        guard.send(&request(), Deadline::never()).await,
+        Err(ProviderError::Transport(_))
+    );
     assert_eq!(sender.sent().len(), 1);
 
     let guard = SuppressionGuard {
@@ -102,7 +111,10 @@ async fn bootstrap_drain_storage_loss_and_rate_denials_never_call_the_sender() {
         control: open_control(&store).await,
     };
     store.pool.close().await;
-    assert_matches!(guard.send(&request()).await, Err(ProviderError::Transport(_)));
+    assert_matches!(
+        guard.send(&request(), Deadline::never()).await,
+        Err(ProviderError::Transport(_))
+    );
     assert_eq!(sender.sent().len(), 1);
 }
 
@@ -116,6 +128,9 @@ async fn invalid_input_is_rejected_before_a_database_lookup() {
     let guard = SuppressionGuard { inner: sender.clone(), store, control };
     let mut invalid = request();
     invalid.to_addresses = vec!["invalid".into()];
-    assert_matches!(guard.send(&invalid).await, Err(ProviderError::InvalidAddress(_)));
+    assert_matches!(
+        guard.send(&invalid, Deadline::never()).await,
+        Err(ProviderError::InvalidAddress(_))
+    );
     assert!(sender.sent().is_empty());
 }

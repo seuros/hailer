@@ -58,3 +58,9 @@ topic_arn = "arn:aws:sns:us-east-1:123456789012:mail-feedback"
 # [domain_intel]
 # provider = "rdap"
 # new_domain_threshold_days = 30
+
+# Opt in: let operators arm fault-injection experiments against the provider,
+# the feedback queue or the verifier (hailer arm-experiment). Without this
+# block nothing reads hailer.rogue_experiments and every call passes.
+# [rogue]
+# poll_interval_seconds = 5

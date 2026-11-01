@@ -130,13 +130,13 @@ async fn a_refused_connection_is_not_sent_and_a_dropped_answer_is_lost() {
     let url = format!("http://{}", closed.local_addr().expect("address"));
     drop(closed);
     assert_matches!(
-        ses::send_email(&aws(&url, None), b"{}".to_vec()).await,
+        ses::send_email(&aws(&url, None), b"{}".to_vec(), ses::SEND_TIMEOUT).await,
         Err(CallError::NotSent(_))
     );
 
     let server = endpoint(200, "", true).await;
     assert_matches!(
-        ses::send_email(&aws(&server.url, None), b"{}".to_vec()).await,
+        ses::send_email(&aws(&server.url, None), b"{}".to_vec(), ses::SEND_TIMEOUT).await,
         Err(CallError::Lost)
     );
     server.stop().await;
@@ -184,7 +184,7 @@ async fn configured_endpoint_urls_replace_the_aws_hosts() {
 
     let global = format!("{}/", server.url);
     let aws = load(&[("AWS_ENDPOINT_URL", global.as_str())]).await;
-    let response = ses::send_email(&aws, b"{}".to_vec()).await.expect("answer");
+    let response = ses::send_email(&aws, b"{}".to_vec(), ses::SEND_TIMEOUT).await.expect("answer");
     assert!(response.is_success());
     let headers = server.requests()[0].headers.clone();
     assert!(headers.starts_with("POST /v2/email/outbound-emails HTTP/1.1"), "{headers}");

@@ -5,53 +5,60 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono_machines::Policy;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use super::Worker;
 use crate::aws::Aws;
 use crate::config::Config;
 use crate::control::Control;
+use crate::rogue::Experiments;
 use crate::runtime::Runtime;
 use crate::state::Store;
 
-pub async fn spawn(
-    tasks: &mut JoinSet<anyhow::Result<()>>,
+pub async fn workers(
     config: &Config,
     store: &Store,
     runtime: &Arc<Runtime>,
+    experiments: &Arc<Experiments>,
     stop: &CancellationToken,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<Worker>> {
     let discovery = config.rate_limit.as_ref().filter(|rate| rate.discover_from_aws);
     if config.feedback.is_none() && discovery.is_none() && config.suppression_sync.is_none() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let aws = Arc::new(Aws::load().await?);
+    let mut workers = Vec::new();
     if let Some(feedback) = config.feedback.clone() {
-        let queue = crate::feedback::AwsQueue::new(aws.clone(), feedback.queue_url.clone());
-        let (store, runtime, stop) = (store.clone(), runtime.clone(), stop.clone());
-        tasks.spawn(
-            async move { crate::feedback::run(&queue, store, &feedback, &runtime, stop).await },
-        );
+        let (aws, store, runtime, stop) =
+            (aws.clone(), store.clone(), runtime.clone(), stop.clone());
+        let experiments = experiments.clone();
+        workers.push(Worker::new("feedback", move || {
+            let queue = crate::feedback::AwsQueue::new(
+                aws.clone(),
+                feedback.queue_url.clone(),
+                experiments.clone(),
+            );
+            let (feedback, store, runtime, stop) =
+                (feedback.clone(), store.clone(), runtime.clone(), stop.clone());
+            async move { crate::feedback::run(&queue, store, &feedback, &runtime, stop).await }
+        }));
     }
     if let Some(rate) = discovery {
-        tasks.spawn(discover_rate(
-            aws.clone(),
-            runtime.control.clone(),
-            Duration::from_secs(rate.discovery_interval_seconds),
-            stop.clone(),
-        ));
+        let interval = Duration::from_secs(rate.discovery_interval_seconds);
+        let (aws, control, stop) = (aws.clone(), runtime.control.clone(), stop.clone());
+        workers.push(Worker::new("rate_discovery", move || {
+            discover_rate(aws.clone(), control.clone(), interval, stop.clone())
+        }));
     }
     if let Some(sync) = &config.suppression_sync {
-        tasks.spawn(reconcile(
-            aws,
-            store.clone(),
-            runtime.clone(),
-            Duration::from_secs(sync.interval_seconds),
-            stop.clone(),
-        ));
+        let interval = Duration::from_secs(sync.interval_seconds);
+        let (store, runtime, stop) = (store.clone(), runtime.clone(), stop.clone());
+        workers.push(Worker::new("suppression_sync", move || {
+            reconcile(aws.clone(), store.clone(), runtime.clone(), interval, stop.clone())
+        }));
     }
-    Ok(())
+    Ok(workers)
 }
 
 async fn reconcile(

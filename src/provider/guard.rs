@@ -5,6 +5,8 @@ mod tests;
 
 use std::sync::Arc;
 
+use deadline_machines::Deadline;
+
 use crate::control::{Control, Decision, Snapshot};
 use crate::mail::SendRequest;
 use crate::provider::{MailProvider, ProviderError};
@@ -17,7 +19,11 @@ pub struct SuppressionGuard<P> {
 }
 
 impl<P: MailProvider> MailProvider for SuppressionGuard<P> {
-    async fn send(&self, request: &SendRequest) -> Result<String, ProviderError> {
+    async fn send(
+        &self,
+        request: &SendRequest,
+        deadline: Deadline,
+    ) -> Result<String, ProviderError> {
         let validation = request.validate();
         let mut snapshot = Snapshot {
             valid: validation.is_ok(),
@@ -51,7 +57,7 @@ impl<P: MailProvider> MailProvider for SuppressionGuard<P> {
         snapshot.rate_allowed = snapshot.recipients_allowed
             && self.control.rate_admit(filtered.recipients().count()).await;
         match self.control.decide(snapshot) {
-            Decision::Allow => self.inner.send(&filtered).await,
+            Decision::Allow => self.inner.send(&filtered, deadline).await,
             Decision::Suppressed => Err(ProviderError::Suppressed),
             Decision::RateLimited => Err(ProviderError::RateLimited),
             Decision::Unavailable => Err(ProviderError::Transport("service not ready".into())),

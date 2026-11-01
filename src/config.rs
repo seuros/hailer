@@ -4,10 +4,12 @@
 //! The docking parameters (`MS_PID`/`MS_SHIP`/`MS_SOCKET_DIR`) are exported
 //! by mothership for every bay it launches; the reader here mirrors
 //! `orbitcast/src/config.rs::docking_from` exactly, since both ships dock
-//! against the same supervisor contract.
+//! against the same supervisor contract. `MS_BAY_DRAIN_TIMEOUT` carries the
+//! bay's `request_timeout`, after which mothership abandons a request.
 
 use std::env;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -32,7 +34,11 @@ pub struct DockingConfig {
     pub mothership_pid: u32,
     pub ship_name: String,
     pub socket_dir: PathBuf,
+    pub request_timeout: Duration,
 }
+
+/// Mothership's own default `request_timeout` for an HTTP bay.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl DockingConfig {
     /// The Unix socket this process must listen on for mothership to dial.
@@ -58,7 +64,13 @@ impl DockingConfig {
             },
             PathBuf::from,
         );
-        Ok(Self { mothership_pid, ship_name, socket_dir })
+        let request_timeout =
+            env::var("MS_BAY_DRAIN_TIMEOUT").map_or(Ok(DEFAULT_REQUEST_TIMEOUT), |seconds| {
+                seconds.parse().map(Duration::from_secs).map_err(|_| {
+                    ConfigError::InvalidEnv("MS_BAY_DRAIN_TIMEOUT", "expected seconds")
+                })
+            })?;
+        Ok(Self { mothership_pid, ship_name, socket_dir, request_timeout })
     }
 }
 
@@ -91,6 +103,8 @@ pub struct Config {
     /// way to hold a message for operator review. See
     /// `crate::domain_intel` for why quarantine, not a hard reject.
     pub domain_intel: Option<DomainIntelConfig>,
+    /// Present only where operators may arm fault-injection experiments.
+    pub rogue: Option<RogueConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -235,6 +249,17 @@ const fn default_sync_interval() -> u64 {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RogueConfig {
+    #[serde(default = "default_rogue_poll")]
+    pub poll_interval_seconds: u64,
+}
+
+const fn default_rogue_poll() -> u64 {
+    5
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeedbackConfig {
     pub queue_url: String,
     pub topic_arn: String,
@@ -267,6 +292,7 @@ impl Default for Config {
             ses_configuration_set: None,
             email_verification: None,
             domain_intel: None,
+            rogue: None,
         }
     }
 }
@@ -359,6 +385,13 @@ impl Config {
                 "must be in 60..2592000",
             )?;
         }
+        reject_if(
+            self.rogue
+                .as_ref()
+                .is_some_and(|rogue| !(1..=60).contains(&rogue.poll_interval_seconds)),
+            "rogue.poll_interval_seconds",
+            "must be in 1..60",
+        )?;
         if let Some(intel) = &self.domain_intel {
             reject_if(
                 !(1..=3650).contains(&intel.new_domain_threshold_days),

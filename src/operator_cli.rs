@@ -5,13 +5,56 @@ use std::time::Duration;
 
 use anyhow::ensure;
 
+use rogue_machines::{Fault, Fraction, PER_MILLION};
+
 use crate::outbound::{Resolution, valid_id};
+use crate::rogue::{Armed, MAX_EXPIRY, Target};
 use crate::state::Store;
 use crate::verify::emailable::{BatchStatus, EmailableClient};
 use crate::{
-    BanDomainArgs, BatchStatusArgs, CancelArgs, Command, MessageIdArgs, UnbanDomainArgs,
-    VerifyBatchArgs,
+    ArmArgs, BanDomainArgs, BatchStatusArgs, CancelArgs, Command, DisarmArgs, MessageIdArgs,
+    UnbanDomainArgs, VerifyBatchArgs,
 };
+
+fn target(name: &str) -> anyhow::Result<Target> {
+    Target::parse(name)
+        .ok_or_else(|| anyhow::anyhow!("target must be provider, feedback or verifier"))
+}
+
+fn experiment(options: &ArmArgs) -> anyhow::Result<Armed> {
+    let target = target(&options.target)?;
+    let fault = match (options.fault.as_str(), options.delay_ms) {
+        ("raise", None) => Fault::Raise,
+        ("garble", None) if target != Target::Verifier => Fault::Garble,
+        ("delay", Some(ms)) if ms > 0 => {
+            Fault::Delay { ns: crate::budget::nanos(Duration::from_millis(ms)) }
+        }
+        _ => anyhow::bail!(
+            "fault must be raise, garble (not for verifier) or delay with a positive --delay-ms"
+        ),
+    };
+    ensure!(
+        options.percent > 0.0 && options.percent <= 100.0,
+        "--percent must be above 0 and at most 100"
+    );
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "bounded to 1..=PER_MILLION by the check above"
+    )]
+    let millionths = (options.percent / 100.0 * f64::from(PER_MILLION)).round().max(1.0) as u32;
+    let remaining = Duration::from_secs(options.expires_in_seconds);
+    ensure!(
+        !remaining.is_zero() && remaining <= MAX_EXPIRY,
+        "--expires-in-seconds must be in 1..86400"
+    );
+    Ok(Armed {
+        target,
+        fault,
+        fraction: Fraction::new(millionths).ok_or_else(|| anyhow::anyhow!("percent too large"))?,
+        remaining,
+    })
+}
 
 /// `EMAILABLE_API_KEY` is read here, not from `hailer.toml` - same rule as
 /// the real-time guard's own `build_verifier` in main.rs. Independent of
@@ -221,6 +264,30 @@ pub async fn run(command: &Command, store: &Store) -> anyhow::Result<bool> {
                     "available_credits": account.available_credits,
                 })
             );
+        }
+        _ => return experiment_command(command, store).await,
+    }
+    Ok(true)
+}
+
+async fn experiment_command(command: &Command, store: &Store) -> anyhow::Result<bool> {
+    match command {
+        Command::ArmExperiment(options) => {
+            let armed = experiment(options)?;
+            store
+                .arm_experiment(armed.target, armed.fault, armed.fraction, armed.remaining)
+                .await?;
+            println!("{}", serde_json::json!({"armed": armed.to_json()}));
+        }
+        Command::DisarmExperiment(DisarmArgs { target: name }) => {
+            let disarmed =
+                store.disarm_experiments(name.as_deref().map(target).transpose()?).await?;
+            println!("{}", serde_json::json!({"disarmed": disarmed}));
+        }
+        Command::ListExperiments => {
+            let armed: Vec<_> =
+                store.experiments().await?.into_iter().map(Armed::to_json).collect();
+            println!("{}", serde_json::json!({"experiments": armed}));
         }
         _ => return Ok(false),
     }

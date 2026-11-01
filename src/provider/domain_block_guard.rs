@@ -8,6 +8,7 @@ mod tests;
 
 use std::sync::Arc;
 
+use deadline_machines::Deadline;
 use tracing::warn;
 
 use crate::domain_block;
@@ -21,7 +22,11 @@ pub struct DomainBlockGuard<P> {
 }
 
 impl<P: MailProvider> MailProvider for DomainBlockGuard<P> {
-    async fn send(&self, request: &SendRequest) -> Result<String, ProviderError> {
+    async fn send(
+        &self,
+        request: &SendRequest,
+        deadline: Deadline,
+    ) -> Result<String, ProviderError> {
         // A lookup failure fails open - the same policy as the verification
         // guard. A broken blocklist query should not stop real mail.
         let patterns = self.store.domain_block_patterns().await.unwrap_or_else(|error| {
@@ -40,7 +45,7 @@ impl<P: MailProvider> MailProvider for DomainBlockGuard<P> {
         if filtered.recipients().next().is_none() {
             return Err(ProviderError::Suppressed);
         }
-        self.inner.send(&filtered).await
+        self.inner.send(&filtered, deadline).await
     }
 
     fn circuit_state(&self) -> &'static str {

@@ -9,8 +9,10 @@ mod message;
 #[cfg(test)]
 mod tests;
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use deadline_machines::Deadline;
 use rama::http::BodyExtractExt;
 use rama::http::client::DefaultHttpWebClient;
 use rama::http::service::client::HttpClientExt;
@@ -21,7 +23,8 @@ use crate::config::PostmarkConfig;
 use crate::mail::SendRequest;
 use crate::outbound::Correlation;
 use crate::provider::queued::{DispatchFailure, DispatchOutcome, QueuedProvider};
-use crate::provider::{MailProvider, ProviderError, SendCircuit};
+use crate::provider::{MailProvider, ProviderError, SendCircuit, send_timeout};
+use crate::rogue::Experiments;
 
 const API: &str = "https://api.postmarkapp.com";
 const INACTIVE_RECIPIENT: i64 = 406;
@@ -85,6 +88,11 @@ impl PostmarkProvider {
         }
     }
 
+    pub fn with_experiments(mut self, experiments: Arc<Experiments>) -> Self {
+        self.circuit.experiments = experiments;
+        self
+    }
+
     /// `GET /server`: proves the token and names the server it belongs to.
     pub async fn server(&self) -> anyhow::Result<Server> {
         let response = self
@@ -113,7 +121,7 @@ impl PostmarkProvider {
             .inspect_err(|error| warn!(%error, "message cannot be sent through Postmark"))
     }
 
-    async fn post(&self, body: Vec<u8>) -> Answer {
+    async fn post(&self, body: Vec<u8>, timeout: Duration) -> Answer {
         let response = match self
             .http
             .post(format!("{}/email", self.api))
@@ -122,7 +130,7 @@ impl PostmarkProvider {
             .header("content-type", "application/json")
             .header("user-agent", crate::web::USER_AGENT)
             .body(body)
-            .send_with_timeout(TIMEOUT)
+            .send_with_timeout(timeout)
             .await
         {
             Ok(response) => response,
@@ -196,11 +204,18 @@ fn dispatch_result(answer: Answer) -> Result<String, DispatchFailure> {
 }
 
 impl MailProvider for PostmarkProvider {
-    async fn send(&self, request: &SendRequest) -> Result<String, ProviderError> {
+    async fn send(
+        &self,
+        request: &SendRequest,
+        deadline: Deadline,
+    ) -> Result<String, ProviderError> {
         // Invalid input must not consume a half-open probe or trip a circuit.
         request.validate()?;
         let body = self.render(request, None).map_err(|_| ProviderError::InvalidRequest)?;
-        self.circuit.send(|| async { send_result(self.post(body).await) }).await
+        let timeout = send_timeout(deadline, TIMEOUT)?;
+        self.circuit
+            .send(timeout, |left| async move { send_result(self.post(body, left).await) })
+            .await
     }
 
     fn circuit_state(&self) -> &'static str {
@@ -221,6 +236,8 @@ impl QueuedProvider for PostmarkProvider {
         let Ok(body) = self.render(request, Some(correlation)) else {
             return INVALID;
         };
-        self.circuit.dispatch(|| async { dispatch_result(self.post(body).await) }).await
+        self.circuit
+            .dispatch(TIMEOUT, |left| async move { dispatch_result(self.post(body, left).await) })
+            .await
     }
 }

@@ -7,8 +7,10 @@
 mod tests;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::BytesMut;
+use deadline_machines::Deadline;
 use mothership_docking_protocol::{
     MessageType, Reply, ReplyBody, decode_hail, decode_haul, encode_ready, encode_reply, push_haul,
 };
@@ -32,6 +34,9 @@ const LIFECYCLE_PATH: &str = "/internal/mail/messages/events";
 const INTAKE_READY_PATH: &str = "/internal/mail/intake-ready";
 const DISPATCH_READY_PATH: &str = "/internal/mail/dispatch-ready";
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Kept back from mothership's request timeout to write the reply in.
+const REPLY_MARGIN: Duration = Duration::from_secs(1);
 
 pub async fn serve_link<S, P: MailProvider>(
     mut stream: S,
@@ -39,6 +44,7 @@ pub async fn serve_link<S, P: MailProvider>(
     provider: Arc<P>,
     store: Store,
     runtime: Arc<Runtime>,
+    budget: Duration,
     stop: CancellationToken,
 ) -> anyhow::Result<()>
 where
@@ -54,11 +60,12 @@ where
             anyhow::bail!("expected HAIL, got {msg_type:?}");
         }
         let hail = decode_hail(&payload)?;
+        let deadline = crate::budget::after(budget.saturating_sub(REPLY_MARGIN));
         let request_id = hail.request_id;
         let permit = runtime.enter();
 
         let body = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            BODY_READ_TIMEOUT,
             read_body(&mut stream, &mut pending, request_id, hail.content_length),
         )
         .await
@@ -89,7 +96,7 @@ where
         } else if let Some(response) = queued_route(method, path, &body, &store, &runtime).await {
             response
         } else {
-            handle(method, path, &body, &provider).await
+            handle(method, path, &body, &provider, deadline).await
         };
         write_reply(&mut stream, request_id, status, &response_body).await?;
         stream.write_all(&encode_ready(request_id)).await?;
@@ -242,6 +249,7 @@ async fn handle<P: MailProvider>(
     path: &[u8],
     body: &[u8],
     provider: &Arc<P>,
+    deadline: Deadline,
 ) -> (u16, Vec<u8>) {
     if method != b"POST" || path != SEND_PATH.as_bytes() {
         return error_reply(404, "not found");
@@ -252,7 +260,7 @@ async fn handle<P: MailProvider>(
         Err(error) => return error_reply(400, &error.to_string()),
     };
 
-    match provider.send(&request).await {
+    match provider.send(&request, deadline).await {
         Ok(message_id) => {
             let response = SendResponse { message_id };
             (200, serde_json::to_vec(&response).unwrap_or_default())

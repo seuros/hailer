@@ -4,6 +4,7 @@ use base64::Engine;
 
 use super::*;
 use crate::aws::Credentials;
+use crate::provider::SEND_FLOOR;
 use crate::provider::test_support::{Endpoint, correlation, endpoint, request};
 use std::assert_matches;
 
@@ -84,7 +85,10 @@ async fn queued_provider_distinguishes_positive_rejections_from_unknown_outcomes
 #[tokio::test]
 async fn send_is_single_attempt_even_for_server_errors() {
     let (provider, server) = fixture(500, r#"{"message":"server failed"}"#, false).await;
-    assert_matches!(provider.send(&request()).await, Err(ProviderError::Transport(_)));
+    assert_matches!(
+        provider.send(&request(), Deadline::never()).await,
+        Err(ProviderError::Transport(_))
+    );
     assert_eq!(server.calls(), 1);
     server.stop().await;
 }
@@ -92,7 +96,10 @@ async fn send_is_single_attempt_even_for_server_errors() {
 #[tokio::test]
 async fn network_loss_has_an_explicit_ambiguous_outcome_and_is_not_retried() {
     let (provider, server) = fixture(200, "", true).await;
-    assert_matches!(provider.send(&request()).await, Err(ProviderError::Ambiguous));
+    assert_matches!(
+        provider.send(&request(), Deadline::never()).await,
+        Err(ProviderError::Ambiguous)
+    );
     assert_eq!(server.calls(), 1);
     server.stop().await;
 }
@@ -103,14 +110,14 @@ async fn client_rejections_and_invalid_input_do_not_trip_the_provider_circuit() 
         fixture(400, r#"{"__type":"MessageRejected","message":"recipient private detail"}"#, false)
             .await;
     for _ in 0..8 {
-        let error = provider.send(&request()).await.expect_err("rejected");
+        let error = provider.send(&request(), Deadline::never()).await.expect_err("rejected");
         assert_matches!(error, ProviderError::Rejected(_));
         assert!(!error.to_string().contains("private"));
     }
     let mut invalid = request();
     invalid.to_addresses = vec!["invalid".into()];
     for _ in 0..8 {
-        assert!(provider.send(&invalid).await.is_err());
+        assert!(provider.send(&invalid, Deadline::never()).await.is_err());
     }
     assert_eq!(server.calls(), 8);
     assert_eq!(provider.circuit_state(), "closed");
@@ -121,7 +128,7 @@ async fn client_rejections_and_invalid_input_do_not_trip_the_provider_circuit() 
 async fn transient_failures_open_the_circuit_without_more_http_calls() {
     let (provider, server) = fixture(503, r#"{"message":"unavailable"}"#, false).await;
     for _ in 0..8 {
-        assert!(provider.send(&request()).await.is_err());
+        assert!(provider.send(&request(), Deadline::never()).await.is_err());
     }
     assert_eq!(server.calls(), 5);
     assert_eq!(provider.circuit_state(), "open");
@@ -151,9 +158,21 @@ async fn live_ses_accepts_raw_mime_through_the_mailbox_simulator() {
         cc_addresses: vec![],
         bcc_addresses: vec![],
     };
-    let id = provider.send(&request).await.expect("sync send accepted");
+    let id = provider.send(&request, Deadline::never()).await.expect("sync send accepted");
     eprintln!("sync send: {id}");
     let outcome = provider.dispatch(&request, &correlation()).await;
     eprintln!("queued dispatch: {outcome:?}");
     assert_matches!(outcome, DispatchOutcome::Accepted(_));
+}
+
+#[tokio::test]
+async fn a_budget_below_the_send_floor_refuses_without_calling_ses_or_tripping_the_circuit() {
+    let (provider, server) = fixture(200, r#"{"MessageId":"never"}"#, false).await;
+    for _ in 0..10 {
+        let spent = crate::budget::after(SEND_FLOOR.saturating_sub(Duration::from_millis(1)));
+        assert_matches!(provider.send(&request(), spent).await, Err(ProviderError::BudgetSpent));
+    }
+    assert_eq!(server.calls(), 0);
+    assert_eq!(provider.circuit_state(), "closed");
+    server.stop().await;
 }
