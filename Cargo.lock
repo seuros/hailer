@@ -140,18 +140,18 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "behavior-machines"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3680ec2383b3ab231a802547efca809f9489e3c7735b056df91657bc7c9506c"
+checksum = "710843b8516ad3c210b38b7b892befa1f559effc5daeff9df2a67c2af431a1c3"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "behavior-machines-circuit"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3bab6b9dc05d425a210c2ab13dd99d0c939b9034dac9e789675ba6350b6d0ac"
+checksum = "781f94dd8bb2eacfb123269e6021d612ec4b79e14f713c93773d1c3d46b31fec"
 dependencies = [
  "behavior-machines",
  "thiserror",
@@ -231,9 +231,9 @@ dependencies = [
 
 [[package]]
 name = "breaker-machines"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "291c2a1539bc736fbad99d632bc7b3a6408338e8374e8b8c3b073980d140703e"
+checksum = "5bd70bc4a47f5cd89a1fd71365c78cc35fa2e7e71137819bc119b12f39c010fd"
 dependencies = [
  "chrono-machines",
  "hashbrown 0.17.1",
@@ -981,6 +981,12 @@ dependencies = [
  "tracing-subscriber",
  "usage-rs",
 ]
+
+[[package]]
+name = "harel-machines"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcebc289448746f774618df27ef10cd821a0b5f5c499aa9ef71309c5d04638fc"
 
 [[package]]
 name = "hashbrown"
@@ -3009,9 +3015,9 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "state-machines"
-version = "0.33.0"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbb4dc717155633ee797941dc4bfca09b079a1ad0d1f1ebbad5c1852cbfff59c"
+checksum = "4fa388b364efa05b312baf1580eddfb18f587e79bc27f16c248bd91d2b1741f9"
 dependencies = [
  "serde",
  "state-machines-core",
@@ -3030,10 +3036,11 @@ dependencies = [
 
 [[package]]
 name = "state-machines-macro"
-version = "0.33.0"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7919c2463e1275e0a62affcdca2c5f5245930d095d2fae758fecd3caa79fc14"
+checksum = "957a5b23c5e008070ebd493d8c3a57a267ce9fa0959a170b262d4859b5d719cf"
 dependencies = [
+ "harel-machines",
  "proc-macro2",
  "quote",
  "syn 3.0.9",
