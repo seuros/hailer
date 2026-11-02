@@ -35,7 +35,7 @@ fn submission_to(key: &str, address: &str) -> Submission {
 /// Same shape as `domain_intel::rdap::tests::fixture` - duplicated rather
 /// than shared across test modules, matching this codebase's existing
 /// per-file fixture convention (`ses/tests.rs` does the same).
-async fn rdap_fixture(tld: &'static str, registered_at: &'static str) -> RdapClient {
+async fn rdap_fixture(tld: &'static str, registered_at: &str) -> RdapClient {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("fixture listener");
     let addr = listener.local_addr().expect("fixture address");
     let base_url = format!("http://{addr}/");
@@ -83,7 +83,8 @@ async fn a_non_ascii_domain_is_quarantined_not_rejected() {
 async fn a_newly_registered_domain_is_quarantined_via_rdap() {
     let database = crate::test_support::database().await;
     let store = Store::connect(database.url(), 5).await.expect("store");
-    let client = rdap_fixture("newtld", "2026-10-01T00:00:00Z").await;
+    let registered_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(48);
+    let client = rdap_fixture("newtld", &registered_at.to_string()).await;
     let intel = Intel::Rdap(client);
     let receipt = store
         .submit(submission_to("new-domain", "user@example.newtld"), &budget(), &intel, Some(30))
