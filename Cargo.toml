@@ -40,7 +40,7 @@ thiserror = "2"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 breaker-machines = { version = "0.22", features = ["async"] }
 chrono-machines = "0.10"
-throttle-machines = "0.4"
+throttle-machines = "0.5"
 behavior-machines = "0.3"
 behavior-machines-circuit = "0.4"
 state-machines = { version = "0.34", features = ["dynamic", "serde"] }

@@ -5,7 +5,7 @@
 - Background workers restart one at a time under `supervisor-machines` (1 s doubling to 30 s; more than 3 restarts in 60 s still drains and exits). A panicking SQS consumer no longer takes the docking links and in-flight sends down with it.
 - Synchronous sends run on one `deadline-machines` budget taken from Mothership's `MS_BAY_DRAIN_TIMEOUT`: verification and the provider call share it, and with under 2 s left the answer is 503 `budget_spent` with nothing sent, instead of a provider call Mothership has already abandoned.
 - Opt-in fault injection (`[rogue]`, `rogue-machines`): `hailer arm-experiment`/`disarm-experiment`/`list-experiments` against the provider, SQS feedback or the verifier, with a mandatory expiry of at most 24 hours. Migration `06_rogue_experiments`.
-- breaker-machines 0.22, behavior-machines 0.3, behavior-machines-circuit 0.4, chrono-machines 0.10, throttle-machines 0.4, state-machines 0.34: the whole family on one state-machines.
+- breaker-machines 0.22, behavior-machines 0.3, behavior-machines-circuit 0.4, chrono-machines 0.10, throttle-machines 0.5, state-machines 0.34: the whole family on one state-machines. Every other dependency at its latest compatible release.
 
 ## 0.7.1
 
