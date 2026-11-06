@@ -38,14 +38,14 @@ usage-rs = "7"
 anyhow = "1"
 thiserror = "2"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
-breaker-machines = { version = "0.22", features = ["async"] }
-chrono-machines = "0.10"
+breaker-machines = { version = "0.23", features = ["async"] }
+chrono-machines = { version = "0.11", features = ["async"] }
 throttle-machines = "0.5"
 behavior-machines = "0.3"
 behavior-machines-circuit = "0.4"
 state-machines = { version = "0.34", features = ["dynamic", "serde"] }
-deadline-machines = "0.2"
-supervisor-machines = "0.3"
+deadline-machines = "0.4"
+supervisor-machines = "0.4"
 rogue-machines = "0.2"
 
 [dev-dependencies]

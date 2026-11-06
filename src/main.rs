@@ -22,6 +22,7 @@ compile_error!("hailer needs a mail provider: build with --features ses, postmar
 
 #[cfg(feature = "ses")]
 mod aws;
+mod backoff;
 mod bay;
 mod budget;
 mod config;

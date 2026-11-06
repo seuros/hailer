@@ -19,6 +19,7 @@ use sqlx::Row;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::backoff::pause;
 use crate::state::Store;
 
 /// The longest an experiment may stay armed.
@@ -265,9 +266,8 @@ pub async fn watch(
                 warn!(%error, "Rogue experiments unavailable; armed set kept until expiry");
             }
         }
-        tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            () = tokio::time::sleep(every) => {}
+        if !pause(&stop, every).await {
+            return Ok(());
         }
     }
 }

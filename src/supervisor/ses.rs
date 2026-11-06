@@ -4,12 +4,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono_machines::Policy;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::Worker;
 use crate::aws::Aws;
+use crate::backoff::{Backoff, pause};
 use crate::config::Config;
 use crate::control::Control;
 use crate::rogue::Experiments;
@@ -68,13 +68,7 @@ async fn reconcile(
     interval: Duration,
     stop: CancellationToken,
 ) -> anyhow::Result<()> {
-    let backoff = Policy {
-        max_attempts: u8::MAX,
-        base_delay_ms: 1000,
-        multiplier: 2.0,
-        max_delay_ms: 30_000,
-    };
-    let mut failures = 0u8;
+    let mut backoff = Backoff::new();
     loop {
         let operation = async {
             let source = crate::suppression_sync::AwsSuppressions::new(aws.clone()).await?;
@@ -85,7 +79,7 @@ async fn reconcile(
             result = operation => result,
         };
         let delay = if let Ok(report) = result {
-            failures = 0;
+            backoff.succeeded();
             runtime.sync_ok(report.merged);
             info!(
                 pages = report.pages,
@@ -95,13 +89,11 @@ async fn reconcile(
             interval
         } else {
             runtime.sync_error();
-            failures = failures.saturating_add(1);
             warn!("AWS suppression reconciliation failed; checkpoint retained");
-            Duration::from_millis(backoff.calculate_delay(failures, 0.25))
+            backoff.failed()
         };
-        tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            () = tokio::time::sleep(delay) => {}
+        if !pause(&stop, delay).await {
+            return Ok(());
         }
     }
 }
@@ -112,13 +104,7 @@ async fn discover_rate(
     interval: Duration,
     stop: CancellationToken,
 ) -> anyhow::Result<()> {
-    let backoff = Policy {
-        max_attempts: u8::MAX,
-        base_delay_ms: 1000,
-        multiplier: 2.0,
-        max_delay_ms: 30_000,
-    };
-    let mut failures = 0u8;
+    let mut backoff = Backoff::new();
     loop {
         let operation = crate::aws::ses::account(&aws);
         let result = tokio::select! {
@@ -131,7 +117,7 @@ async fn discover_rate(
             .and_then(|quota| quota.max_send_rate)
         {
             Some(rate) if rate > 0.0 => {
-                failures = 0;
+                backoff.succeeded();
                 if let Err(error) = control.set_rate(rate).await {
                     warn!(%error, "could not persist discovered SES send rate");
                 } else {
@@ -140,14 +126,12 @@ async fn discover_rate(
                 interval
             }
             _ => {
-                failures = failures.saturating_add(1);
                 warn!("SES account rate discovery failed; keeping the last known rate");
-                Duration::from_millis(backoff.calculate_delay(failures, 0.25))
+                backoff.failed()
             }
         };
-        tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            () = tokio::time::sleep(delay) => {}
+        if !pause(&stop, delay).await {
+            return Ok(());
         }
     }
 }

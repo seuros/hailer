@@ -4,9 +4,13 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::backoff::{Backoff, pause};
 use crate::provider::queued::{DispatchOutcome, QueuedProvider};
 use crate::runtime::Runtime;
 use crate::state::Store;
+
+/// How long the dispatcher idles between cycles while nothing is claimable.
+const IDLE: Duration = Duration::from_millis(250);
 
 pub async fn run<P: QueuedProvider>(
     provider: Arc<P>,
@@ -19,7 +23,7 @@ pub async fn run<P: QueuedProvider>(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("dispatcher requires queued configuration"))?
         .unknown_retention_seconds;
-    let mut failures = 0u8;
+    let mut backoff = Backoff::new();
     loop {
         if stop.is_cancelled() {
             return Ok(());
@@ -27,24 +31,14 @@ pub async fn run<P: QueuedProvider>(
         let result = cycle(&*provider, &store, &runtime, &stop, retention).await;
         runtime.dispatch_state(result.is_ok());
         let delay = if result.is_ok() {
-            failures = 0;
-            Duration::from_millis(250)
+            backoff.succeeded();
+            IDLE
         } else {
-            failures = failures.saturating_add(1);
             warn!("Dispatcher operation failed; durable attempts retained for recovery");
-            Duration::from_millis(
-                chrono_machines::Policy {
-                    max_attempts: u8::MAX,
-                    base_delay_ms: 1000,
-                    multiplier: 2.0,
-                    max_delay_ms: 30_000,
-                }
-                .calculate_delay(failures, 0.25),
-            )
+            backoff.failed()
         };
-        tokio::select! {
-            () = stop.cancelled() => return Ok(()),
-            () = tokio::time::sleep(delay) => {}
+        if !pause(&stop, delay).await {
+            return Ok(());
         }
     }
 }

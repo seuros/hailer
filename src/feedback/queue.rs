@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use super::FeedbackEvent;
 use crate::aws::Aws;
+use crate::backoff::{Backoff, pause};
 use crate::config::FeedbackConfig;
 use crate::rogue::{Experiments, Injected, Target};
 use crate::runtime::Runtime;
@@ -90,13 +91,7 @@ pub async fn run(
     runtime: &Runtime,
     stop: CancellationToken,
 ) -> anyhow::Result<()> {
-    let backoff = chrono_machines::Policy {
-        max_attempts: u8::MAX,
-        base_delay_ms: 1000,
-        multiplier: 2.0,
-        max_delay_ms: 30_000,
-    };
-    let mut failures = 0u8;
+    let mut backoff = Backoff::new();
     loop {
         let received = tokio::select! {
             biased;
@@ -104,7 +99,7 @@ pub async fn run(
             result = queue.receive() => result,
         };
         if let Ok(messages) = received {
-            failures = 0;
+            backoff.succeeded();
             runtime.feedback_ok();
             for message in messages {
                 if stop.is_cancelled() {
@@ -121,11 +116,9 @@ pub async fn run(
             }
         } else {
             runtime.feedback_error();
-            failures = failures.saturating_add(1);
             warn!("SQS receive failed");
-            tokio::select! {
-                () = stop.cancelled() => return Ok(()),
-                () = tokio::time::sleep(Duration::from_millis(backoff.calculate_delay(failures, 0.25))) => {}
+            if !pause(&stop, backoff.failed()).await {
+                return Ok(());
             }
         }
     }

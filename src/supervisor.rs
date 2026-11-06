@@ -16,6 +16,7 @@ use tokio::task::{Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::backoff::pause;
 use crate::config::{Config, DockingConfig};
 use crate::control::Control;
 use crate::domain_intel::Intel;
@@ -95,9 +96,8 @@ impl Crew {
         let run = (self.workers[index].start)();
         let stop = self.stop.clone();
         let handle = self.tasks.spawn(async move {
-            tokio::select! {
-                () = stop.cancelled() => return Ok(()),
-                () = tokio::time::sleep(delay) => {}
+            if !pause(&stop, delay).await {
+                return Ok(());
             }
             run.await
         });

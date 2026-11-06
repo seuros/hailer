@@ -9,7 +9,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::ensure;
-use chrono_machines::Policy;
+use chrono_machines::{AsyncRetryable, ExponentialBackoff, RetryError, RetryOutcome};
 use serde::Serialize;
 use sqlx::postgres::PgAdvisoryLock;
 use sqlx::{Connection, Either};
@@ -107,17 +107,22 @@ async fn run_locked(source: &impl Source, store: &Store, restart: bool) -> anyho
     anyhow::bail!("suppression synchronization page limit reached; checkpoint retained")
 }
 
+/// Only [`ReadError::Unavailable`] is retried, three reads at most, a second
+/// then two between them. Anything else is a token or access problem that a
+/// retry cannot fix.
 async fn read_page(source: &impl Source, token: Option<&str>) -> Result<Page, ReadError> {
-    let policy =
-        Policy { max_attempts: 3, base_delay_ms: 1000, multiplier: 2.0, max_delay_ms: 3000 };
-    for attempt in 1..=policy.max_attempts {
-        match source.page(token).await {
-            Err(ReadError::Unavailable) if attempt < policy.max_attempts => {
-                tokio::time::sleep(Duration::from_millis(policy.calculate_delay(attempt, 0.25)))
-                    .await;
-            }
-            result => return result,
-        }
-    }
-    Err(ReadError::Unavailable)
+    (|| source.page(token))
+        .retry_async(
+            ExponentialBackoff::new()
+                .max_attempts(3)
+                .base_delay_ms(1_000)
+                .multiplier(2.0)
+                .max_delay_ms(3_000)
+                .jitter_factor(0.25),
+        )
+        .when(|error| *error == ReadError::Unavailable)
+        .call_async(|ms| tokio::time::sleep(Duration::from_millis(ms)))
+        .await
+        .map(RetryOutcome::into_inner)
+        .map_err(RetryError::into_cause)
 }
