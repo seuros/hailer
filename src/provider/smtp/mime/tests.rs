@@ -1,20 +1,6 @@
 use super::*;
+use crate::provider::smtp::tests::sample_request;
 use crate::provider::test_support::correlation;
-
-fn sample_request() -> SendRequest {
-    SendRequest {
-        raw_mime: "From: \"Alice\" <alice@example.dev>\r\n\
-                   To: bob@example.dev\r\n\
-                   Message-ID: <msg-123@example.dev>\r\n\
-                   Subject: Hello\r\n\r\n\
-                   Body"
-            .into(),
-        from_email_address: None,
-        to_addresses: vec!["bob@example.dev".into()],
-        cc_addresses: vec![],
-        bcc_addresses: vec![],
-    }
-}
 
 #[test]
 fn queue_id_extraction_respects_word_boundaries() {

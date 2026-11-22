@@ -154,6 +154,35 @@ pub(super) async fn start_raw_responder(payload: Vec<u8>) -> (u16, JoinHandle<()
     (port, task)
 }
 
+pub(super) async fn start_scripted_responder(
+    greeting: &'static [u8],
+    exchanges: &'static [(&'static str, &'static [u8])],
+) -> (u16, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut io = BufReader::new(stream);
+                if io.get_mut().write_all(greeting).await.is_err() {
+                    return;
+                }
+                let mut line = String::new();
+                for &(prefix, reply) in exchanges {
+                    line.clear();
+                    if !matches!(io.read_line(&mut line).await, Ok(n) if n > 0)
+                        || !line.to_ascii_uppercase().starts_with(prefix)
+                        || io.get_mut().write_all(reply).await.is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (port, task)
+}
+
 pub(super) fn make_localhost_tls() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
     let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
     let params = rcgen::CertificateParams::new(vec!["localhost".into()]).expect("cert params");
@@ -194,14 +223,33 @@ async fn drive_smtp<S>(
         return;
     }
 
+    if drive_commands(&mut io, b, rec, starttls_acceptor.is_some()).await
+        && let Some(acceptor) = starttls_acceptor
+        && let Ok(tls) = acceptor.accept(io.into_inner()).await
+    {
+        rec.tls_upgraded = true;
+        drive_commands(&mut BufReader::new(tls), b, rec, false).await;
+    }
+}
+
+/// Returns true only when the client requested an upgrade and received the 220 reply.
+async fn drive_commands<S>(
+    io: &mut BufReader<S>,
+    b: &ServerBehavior,
+    rec: &mut RecordedSession,
+    can_upgrade: bool,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut line = String::new();
     loop {
         line.clear();
         let Ok(n) = io.read_line(&mut line).await else {
-            return;
+            return false;
         };
         if n == 0 {
-            return;
+            return false;
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         rec.commands.push(trimmed.to_owned());
@@ -209,7 +257,7 @@ async fn drive_smtp<S>(
 
         if upper.starts_with("EHLO ") {
             let mut caps = vec!["250-localhost".to_owned()];
-            if b.tls == MockTls::Starttls && !rec.tls_upgraded {
+            if b.tls == MockTls::Starttls && can_upgrade {
                 caps.push("250-STARTTLS".to_owned());
             }
             if !b.auth_caps.is_empty() {
@@ -219,59 +267,16 @@ async fn drive_smtp<S>(
             caps.last_mut().expect("EHLO line").replace_range(3..4, " ");
             let resp = format!("{}\r\n", caps.join("\r\n"));
             if io.get_mut().write_all(resp.as_bytes()).await.is_err() {
-                return;
+                return false;
             }
         } else if upper == "STARTTLS" {
-            let Some(acceptor) = starttls_acceptor else {
-                let _ = io.get_mut().write_all(b"502 not supported\r\n").await;
-                return;
-            };
-            if io.get_mut().write_all(b"220 2.0.0 Ready to start TLS\r\n").await.is_err() {
-                return;
+            if can_upgrade {
+                return io.get_mut().write_all(b"220 2.0.0 Ready to start TLS\r\n").await.is_ok();
             }
-            let raw = io.into_inner();
-            if let Ok(tls) = acceptor.accept(raw).await {
-                rec.tls_upgraded = true;
-                drive_smtp_tls(tls, b, rec).await;
-            }
-            return;
-        } else if !handle_post_ehlo_command(&mut io, &upper, b, rec).await {
-            return;
-        }
-    }
-}
-
-async fn drive_smtp_tls<S>(stream: S, b: &ServerBehavior, rec: &mut RecordedSession)
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut io = BufReader::new(stream);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let Ok(n) = io.read_line(&mut line).await else {
-            return;
-        };
-        if n == 0 {
-            return;
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        rec.commands.push(trimmed.to_owned());
-        let upper = trimmed.to_ascii_uppercase();
-
-        if upper.starts_with("EHLO ") {
-            let mut caps = vec!["250-localhost".to_owned()];
-            if !b.auth_caps.is_empty() {
-                caps.push(format!("250-{}", b.auth_caps));
-            }
-            caps.extend(b.mail_caps.iter().map(|cap| format!("250-{cap}")));
-            caps.last_mut().expect("EHLO line").replace_range(3..4, " ");
-            let resp = format!("{}\r\n", caps.join("\r\n"));
-            if io.get_mut().write_all(resp.as_bytes()).await.is_err() {
-                return;
-            }
-        } else if !handle_post_ehlo_command(&mut io, &upper, b, rec).await {
-            return;
+            let _ = io.get_mut().write_all(b"502 not supported\r\n").await;
+            return false;
+        } else if !handle_post_ehlo_command(io, &upper, b, rec).await {
+            return false;
         }
     }
 }

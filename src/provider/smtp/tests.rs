@@ -15,9 +15,12 @@ use crate::config::{SmtpAuthMode, SmtpConfig, SmtpTlsMode};
 use crate::outbound::Correlation;
 use crate::provider::SEND_FLOOR;
 use crate::provider::test_support::correlation;
-use mock::{MockFault, MockSmtp, MockTls, ServerBehavior, make_localhost_tls, start_raw_responder};
+use mock::{
+    MockFault, MockSmtp, MockTls, ServerBehavior, make_localhost_tls, start_raw_responder,
+    start_scripted_responder,
+};
 
-fn sample_request() -> SendRequest {
+pub(super) fn sample_request() -> SendRequest {
     SendRequest {
         raw_mime: "From: \"Alice\" <alice@example.dev>\r\n\
                    To: bob@example.dev\r\n\
@@ -352,29 +355,15 @@ async fn budget_below_send_floor_and_missing_from_refuse_without_connecting() {
 
 #[tokio::test]
 async fn starttls_refuses_buffered_plaintext_bytes_before_handshake() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    let task = tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                let mut io = BufReader::new(stream);
-                let _ = io.get_mut().write_all(b"220 localhost ESMTP\r\n").await;
-                let mut line = String::new();
-                while io.read_line(&mut line).await.unwrap_or(0) > 0 {
-                    let upper = line.trim().to_ascii_uppercase();
-                    line.clear();
-                    if upper.starts_with("EHLO") {
-                        let _ = io.get_mut().write_all(b"250-localhost\r\n250 STARTTLS\r\n").await;
-                    } else if upper == "STARTTLS" {
-                        // Response injection: append extra plaintext bytes right
-                        // after the 220 ready line before TLS begins.
-                        let _ = io.get_mut().write_all(b"220 Ready\r\n250 injected\r\n").await;
-                        break;
-                    }
-                }
-            });
-        }
-    });
+    let (port, task) = start_scripted_responder(
+        b"220 localhost ESMTP\r\n",
+        &[
+            ("EHLO ", b"250-localhost\r\n250 STARTTLS\r\n"),
+            // Append extra plaintext after the 220 ready line.
+            ("STARTTLS\r\n", b"220 Ready\r\n250 injected\r\n"),
+        ],
+    )
+    .await;
 
     let (_server_tls, client_tls) = make_localhost_tls();
     let cfg = SmtpConfig {
@@ -666,24 +655,22 @@ async fn message_id_fallbacks_invalid_correlation_and_rogue_experiments() {
 
     // Rogue fault injection: Garble prefixes id with rogue-, Raise fails without connecting.
     let experiments = Arc::new(Experiments::default());
-    experiments.apply(&[Armed {
-        target: Target::Provider,
-        fault: Fault::Garble,
-        fraction: Fraction::ALL,
-        remaining: Duration::from_secs(60),
-    }]);
+    let arm = |fault| {
+        experiments.apply(&[Armed {
+            target: Target::Provider,
+            fault,
+            fraction: Fraction::ALL,
+            remaining: Duration::from_secs(60),
+        }]);
+    };
+    arm(Fault::Garble);
     let rogue_provider = server
         .provider(SmtpTlsMode::None, SmtpAuthMode::None, None)
         .with_experiments(experiments.clone());
     let garbled = rogue_provider.send(&sample_request(), Deadline::never()).await.expect("garble");
     assert_eq!(garbled, "rogue-msg-123@example.dev");
 
-    experiments.apply(&[Armed {
-        target: Target::Provider,
-        fault: Fault::Raise,
-        fraction: Fraction::ALL,
-        remaining: Duration::from_secs(60),
-    }]);
+    arm(Fault::Raise);
     assert_matches!(
         rogue_provider.send(&sample_request(), Deadline::never()).await,
         Err(ProviderError::Transport(_))
@@ -800,25 +787,9 @@ async fn auth_4xx_data_4xx_5xx_legacy_auth_eq_and_debug_redaction() {
 #[tokio::test]
 async fn reply_parser_handles_bare_code_mismatched_multiline_and_bad_separator() {
     // 1. Bare 3-digit reply (no trailing space or text) is valid per RFC 5321.
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let bare_port = listener.local_addr().expect("addr").port();
-    let bare_task = tokio::spawn(async move {
-        if let Ok((stream, _)) = listener.accept().await {
-            let mut io = BufReader::new(stream);
-            let _ = io.get_mut().write_all(b"220\r\n").await;
-            let mut line = String::new();
-            while io.read_line(&mut line).await.unwrap_or(0) > 0 {
-                let upper = line.trim().to_ascii_uppercase();
-                line.clear();
-                if upper.starts_with("EHLO") {
-                    let _ = io.get_mut().write_all(b"250\r\n").await;
-                } else if upper == "QUIT" {
-                    let _ = io.get_mut().write_all(b"221\r\n").await;
-                    break;
-                }
-            }
-        }
-    });
+    let (bare_port, bare_task) =
+        start_scripted_responder(b"220\r\n", &[("EHLO ", b"250\r\n"), ("QUIT\r\n", b"221\r\n")])
+            .await;
     let bare_cfg = SmtpConfig {
         host: "127.0.0.1".into(),
         port: Some(bare_port),

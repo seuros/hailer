@@ -210,6 +210,7 @@ impl SmtpClient {
                 return Err(anyhow::anyhow!("SMTP authentication transport error: {err}"));
             }
         };
+        // The probe has already succeeded; a closing relay can refuse QUIT.
         let _ = write_command(&mut io, "QUIT\r\n").await;
         Ok(SmtpCheckReport {
             host: self.host.clone(),
