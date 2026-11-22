@@ -148,6 +148,9 @@ fn send_result(
         SmtpOutcome::Rejected(code) => {
             Err(ProviderError::Rejected(format!("SMTP server rejected the message ({code})")))
         }
+        SmtpOutcome::MissingExtension(extension) => {
+            Err(ProviderError::Rejected(format!("SMTP server does not advertise {extension}")))
+        }
         SmtpOutcome::Unknown => Err(ProviderError::Ambiguous),
     }
 }
@@ -164,7 +167,9 @@ fn dispatch_result(
         SmtpOutcome::Unsent => Err(DispatchFailure::NotDispatched),
         SmtpOutcome::AuthFailed => Err(DispatchFailure::Unauthorized),
         SmtpOutcome::TempFailed(_) => Err(DispatchFailure::Throttled),
-        SmtpOutcome::Rejected(_) => Err(DispatchFailure::Rejected),
+        SmtpOutcome::Rejected(_) | SmtpOutcome::MissingExtension(_) => {
+            Err(DispatchFailure::Rejected)
+        }
         SmtpOutcome::Unknown => Err(DispatchFailure::Unknown),
     }
 }

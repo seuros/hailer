@@ -57,6 +57,46 @@ async fn plaintext_send_delivers_dot_stuffed_raw_mime_and_returns_queue_id() {
 }
 
 #[tokio::test]
+async fn required_mail_extensions_are_used_or_rejected_before_the_envelope() {
+    for (utf8_envelope, utf8_header, eight_bit, caps, expected) in [
+        (true, false, false, vec!["smtputf8", "8BITMIME"], Some(" SMTPUTF8")),
+        (false, false, true, vec!["8bitmime"], Some(" BODY=8BITMIME")),
+        (false, true, true, vec!["SMTPUTF8", "8BITMIME"], Some(" SMTPUTF8 BODY=8BITMIME")),
+        (true, false, false, vec!["8BITMIME"], None),
+        (false, true, false, vec!["8BITMIME"], None),
+        (false, false, true, vec![], None),
+    ] {
+        let server =
+            MockSmtp::start(ServerBehavior { mail_caps: caps, ..Default::default() }).await;
+        let provider = server.provider(SmtpTlsMode::None, SmtpAuthMode::None, None);
+        let mut request = sample_request();
+        request.raw_mime.insert_str(0, "Return-Path: <bounce@example.dev>\r\n");
+        if utf8_envelope {
+            request.to_addresses[0] = "josé@example.dev".into();
+        }
+        if utf8_header {
+            request.raw_mime.insert_str(0, "X-Example: café\r\n");
+        }
+        if eight_bit {
+            request.raw_mime.push_str(" café");
+        }
+        let outcome = provider.dispatch(&request, &correlation()).await;
+        let sessions = server.wait_sessions(1).await;
+        let session = &sessions[0];
+        if let Some(params) = expected {
+            assert_eq!(outcome, DispatchOutcome::Accepted("Q-42".into()));
+            assert_eq!(session.commands[1], format!("MAIL FROM:<bounce@example.dev>{params}"));
+        } else {
+            assert_eq!(
+                outcome,
+                DispatchOutcome::NotAccepted { code: "provider_rejected", retryable: false }
+            );
+            assert_eq!(session.commands, ["EHLO hailer.test"]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn queued_dispatch_adds_correlation_headers_and_falls_back_to_rfc_message_id() {
     let behavior = ServerBehavior { data_end_reply: "250 OK".into(), ..Default::default() };
     let server = MockSmtp::start(behavior).await;

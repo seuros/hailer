@@ -39,6 +39,7 @@ pub(super) enum MockFault {
 pub(super) struct ServerBehavior {
     pub(super) tls: MockTls,
     pub(super) auth_caps: String,
+    pub(super) mail_caps: Vec<&'static str>,
     pub(super) reject_auth_code: Option<u16>,
     pub(super) mail_from_reply: Option<String>,
     pub(super) rcpt_to_reply: Option<String>,
@@ -52,6 +53,7 @@ impl Default for ServerBehavior {
         Self {
             tls: MockTls::Plain,
             auth_caps: "AUTH PLAIN LOGIN".into(),
+            mail_caps: vec!["8BITMIME"],
             reject_auth_code: None,
             mail_from_reply: None,
             rcpt_to_reply: None,
@@ -213,7 +215,8 @@ async fn drive_smtp<S>(
             if !b.auth_caps.is_empty() {
                 caps.push(format!("250-{}", b.auth_caps));
             }
-            caps.push("250 8BITMIME".to_owned());
+            caps.extend(b.mail_caps.iter().map(|cap| format!("250-{cap}")));
+            caps.last_mut().expect("EHLO line").replace_range(3..4, " ");
             let resp = format!("{}\r\n", caps.join("\r\n"));
             if io.get_mut().write_all(resp.as_bytes()).await.is_err() {
                 return;
@@ -261,7 +264,8 @@ where
             if !b.auth_caps.is_empty() {
                 caps.push(format!("250-{}", b.auth_caps));
             }
-            caps.push("250 8BITMIME".to_owned());
+            caps.extend(b.mail_caps.iter().map(|cap| format!("250-{cap}")));
+            caps.last_mut().expect("EHLO line").replace_range(3..4, " ");
             let resp = format!("{}\r\n", caps.join("\r\n"));
             if io.get_mut().write_all(resp.as_bytes()).await.is_err() {
                 return;

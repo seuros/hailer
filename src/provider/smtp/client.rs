@@ -30,6 +30,8 @@ use crate::config::{SmtpAuthMode, SmtpConfig, SmtpTlsMode};
 
 use super::mime::extract_queue_id;
 
+const HEADER_BODY_SEPARATOR: &[u8] = b"\r\n\r\n";
+
 #[cfg(test)]
 pub(super) use connect::{connect_addrs, interleave_addr_families};
 
@@ -71,6 +73,8 @@ pub(super) enum SmtpOutcome {
     TempFailed(u16),
     /// Server replied `5xx` (permanent refusal of sender, recipient, or body).
     Rejected(u16),
+    /// Relay did not advertise an extension required by this message.
+    MissingExtension(&'static str),
     /// Connection dropped, timed out, or returned an invalid reply *after*
     /// transmitting `DATA` payload; acceptance is unknown.
     Unknown,
@@ -236,7 +240,31 @@ impl SmtpClient {
             Err(AuthOutcome::Transport(_)) => return SmtpOutcome::Unsent,
         }
 
-        let mail_from = format!("MAIL FROM:<{envelope_from}>\r\n");
+        let (headers, body) = data
+            .windows(HEADER_BODY_SEPARATOR.len())
+            .position(|window| window == HEADER_BODY_SEPARATOR)
+            .map_or((data, &[][..]), |end| {
+                (&data[..end], &data[end + HEADER_BODY_SEPARATOR.len()..])
+            });
+        let needs_utf8 = !headers.is_ascii()
+            || !envelope_from.is_ascii()
+            || recipients.iter().any(|address| !address.is_ascii());
+        let needs_8bit = !body.is_ascii();
+        for (required, extension) in [(needs_utf8, "SMTPUTF8"), (needs_8bit, "8BITMIME")] {
+            if required
+                && !capabilities.iter().any(|cap| {
+                    cap.split_ascii_whitespace()
+                        .next()
+                        .is_some_and(|keyword| keyword.eq_ignore_ascii_case(extension))
+                })
+            {
+                return SmtpOutcome::MissingExtension(extension);
+            }
+        }
+
+        let utf8_param = if needs_utf8 { " SMTPUTF8" } else { "" };
+        let body_param = if needs_8bit { " BODY=8BITMIME" } else { "" };
+        let mail_from = format!("MAIL FROM:<{envelope_from}>{utf8_param}{body_param}\r\n");
         let Ok(reply) = command(&mut io, &mail_from).await else {
             return SmtpOutcome::Unsent;
         };

@@ -180,8 +180,11 @@ Unlike Postmark, SMTP passes Rails's rendered MIME through verbatim after CRLF
 normalization and RFC 5321 dot-stuffing, preserving MIME structure, inline
 attachments, custom headers, and DKIM signatures (queued dispatches prepend
 unsigned `X-Hailer-Message-Id` and `X-Hailer-Attempt-Id` headers). Explicit
-`smtp_envelope_from` sets `MAIL FROM`; otherwise Hailer extracts the address
-from the `From` header. `tls = "starttls"` requires the server to advertise and
+`smtp_envelope_from` sets `MAIL FROM`; otherwise Hailer checks `Return-Path`,
+`Sender`, then `From`, in that order. Messages with UTF-8 envelope addresses
+or headers require `SMTPUTF8`, and 8-bit bodies require `8BITMIME`. Hailer
+rejects messages before transmission if the relay lacks a required extension.
+`tls = "starttls"` requires the server to advertise and
 complete `STARTTLS` and refuses plaintext downgrade or buffered pre-TLS bytes.
 Connections to dual-stack hosts stagger IPv6 and IPv4 attempts so a blackholed
 address family does not stall sends.

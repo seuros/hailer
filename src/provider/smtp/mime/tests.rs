@@ -35,6 +35,13 @@ fn envelope_from_handles_folded_headers_comments_and_injection() {
         "From: \"Alice\"\r\n\t<alice@example.dev>\r\nTo: bob@example.dev\r\n\r\nHi".into();
     assert_eq!(envelope_from(&req), Some("alice@example.dev".into()));
 
+    req.raw_mime.insert_str(0, "Sender: sender@example.dev\r\n");
+    assert_eq!(envelope_from(&req), Some("sender@example.dev".into()));
+    req.raw_mime.insert_str(0, "Return-Path: <bounces@example.dev>\r\n");
+    assert_eq!(envelope_from(&req), Some("bounces@example.dev".into()));
+    req.raw_mime = req.raw_mime.replace("<bounces@example.dev>", "<>");
+    assert_eq!(envelope_from(&req), Some(String::new()));
+
     req.from_email_address = Some("bounce@example.dev".into());
     assert_eq!(envelope_from(&req), Some("bounce@example.dev".into()));
 

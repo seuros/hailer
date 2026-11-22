@@ -16,15 +16,22 @@ use crate::outbound::Correlation;
 /// Maximum accepted length for a provider or RFC message identifier.
 const MAX_ID_LEN: usize = 256;
 
-/// Resolve the `MAIL FROM` address: explicit `smtp_envelope_from` wins,
-/// otherwise extract the address from the MIME `From:` header.
+/// Match Ruby Mail's envelope precedence: explicit override, Return-Path,
+/// Sender, then From. An empty return path requests `MAIL FROM:<>`.
 pub(super) fn envelope_from(request: &SendRequest) -> Option<String> {
     if let Some(from) = &request.from_email_address {
         return is_safe_envelope_address(from).then(|| from.clone());
     }
-    let header = extract_header(&request.raw_mime, "from")?;
-    let addr = parse_addr_spec(&header)?;
-    is_safe_envelope_address(addr).then(|| addr.to_owned())
+    for name in ["return-path", "sender", "from"] {
+        if let Some(header) = extract_header(&request.raw_mime, name) {
+            if name == "return-path" && header == "<>" {
+                return Some(String::new());
+            }
+            let addr = parse_addr_spec(&header)?;
+            return is_safe_envelope_address(addr).then(|| addr.to_owned());
+        }
+    }
+    None
 }
 
 /// Extract the RFC 5322 `Message-ID` header value (without surrounding `< >`),
