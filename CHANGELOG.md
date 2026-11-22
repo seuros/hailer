@@ -7,6 +7,18 @@
 - Opt-in fault injection (`[rogue]`, `rogue-machines`): `hailer arm-experiment`/`disarm-experiment`/`list-experiments` against the provider, SQS feedback or the verifier, with a mandatory expiry of at most 24 hours. Migration `06_rogue_experiments`.
 - breaker-machines 0.22, behavior-machines 0.3, behavior-machines-circuit 0.4, chrono-machines 0.10, throttle-machines 0.5, state-machines 0.34: the whole family on one state-machines. Every other dependency at its latest compatible release.
 
+## [0.9.0](https://github.com/seuros/hailer/compare/v0.8.0...v0.9.0) (2026-11-22)
+
+
+### Features
+
+* add SMTP provider ([4d9cb2d](https://github.com/seuros/hailer/commit/4d9cb2d3a96b58d6f757119c8da1daa67abdf3ab))
+
+
+### Bug Fixes
+
+* preserve SMTP envelopes and negotiate mail extensions ([a573336](https://github.com/seuros/hailer/commit/a5733363f3a05b5b3a1152a5e63f7ed8d677a226))
+
 ## [0.8.0](https://github.com/seuros/hailer/compare/v0.7.1...v0.8.0) (2026-11-18)
 
 
