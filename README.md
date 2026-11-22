@@ -7,7 +7,7 @@ This repository is two things:
 - **`hailer` gem** — an ActionMailer adapter, feedback client, and executable
   launcher. Platform gems bundle the Rust binary. No Ruby AWS SDK or native extension.
 - **`hailer` crate** — a standalone Rust mail ship, supervised by Mothership.
-  Sends through SESv2 or Postmark.
+  Sends through SESv2, Postmark, or SMTP.
 
 ```mermaid
 flowchart LR
@@ -78,18 +78,19 @@ The source (`ruby`) gem has the same Rails client and launcher, but no binary.
 For source development or an unsupported platform:
 
 ```sh
-cargo install --path . --locked --features ses,postmark
+cargo install --path . --locked --features ses,postmark,smtp
 export HAILER_BINARY=/absolute/path/to/hailer
 ```
 
 Each provider is a cargo feature, and a build needs at least one. Platform
-gems carry both. On glibc Linux the build needs libclang (`libclang-dev`):
+gems carry all three. On glibc Linux the build needs libclang (`libclang-dev`):
 rama generates its libresolv bindings with bindgen.
 
 | Feature | Adds |
 | --- | --- |
 | `ses` | SES sending, SQS feedback, suppression sync, rate discovery, `ses-*` and `sync-suppressions` commands (hailer's own SigV4 client, no AWS SDK) |
 | `postmark` | MIME parsing for Postmark's JSON API, `postmark-server` command |
+| `smtp` | Native async SMTP submission (`STARTTLS`, implicit TLS, `AUTH PLAIN`/`LOGIN`), `smtp-check` command |
 
 A binary without the configured provider refuses to start and names the
 feature to rebuild with.
@@ -154,6 +155,41 @@ so a queued unknown outcome waits for `hailer resolve-message`. Postmark
 refuses a message (406, suppressed) only when every recipient is inactive in
 its suppression list; otherwise it accepts and skips the inactive ones, which
 Hailer logs as a warning with the count, never the addresses.
+
+### SMTP
+
+```toml
+provider = "smtp"
+
+[smtp]
+host = "mail.example.com"
+port = 587            # defaults: 587 (starttls), 465 (implicit), 25 (none)
+tls = "starttls"      # "starttls" (default), "implicit", or "none"
+auth = "auto"         # "auto" (default), "plain", "login", or "none"
+helo_domain = "mail.example.com"
+```
+
+Set `SMTP_USERNAME` and `SMTP_PASSWORD` in the service's environment, never in
+`hailer.toml`. When `auth = "auto"` and neither variable is set, Hailer sends
+without `AUTH` (useful for local relays or Mailpit); setting only one variable
+is refused, and `auth = "plain"` or `"login"` requires both. `hailer smtp-check`
+connects without requiring PostgreSQL, verifies TLS and authentication, and
+prints the server greeting and capabilities without leaking credentials.
+
+Unlike Postmark, SMTP passes Rails's rendered MIME through verbatim after CRLF
+normalization and RFC 5321 dot-stuffing, preserving MIME structure, inline
+attachments, custom headers, and DKIM signatures (queued dispatches prepend
+unsigned `X-Hailer-Message-Id` and `X-Hailer-Attempt-Id` headers). Explicit
+`smtp_envelope_from` sets `MAIL FROM`; otherwise Hailer extracts the address
+from the `From` header. `tls = "starttls"` requires the server to advertise and
+complete `STARTTLS` and refuses plaintext downgrade or buffered pre-TLS bytes.
+Connections to dual-stack hosts stagger IPv6 and IPv4 attempts so a blackholed
+address family does not stall sends.
+
+The SES-only settings (`ses_configuration_set`, `[feedback]`,
+`[suppression_sync]`, `rate_limit.discover_from_aws`) and `[postmark]` are
+refused with `provider = "smtp"`. SMTP bounces and suppressions are not read by
+Hailer, so a queued unknown outcome waits for `hailer resolve-message`.
 
 ### PostgreSQL
 
@@ -469,6 +505,10 @@ an automatic retry of an ambiguous send.
 Postmark sends are single-attempt too: throttling, a refused token and 5xx
 return 503, other refusals 502, and lost or unreadable answers the
 unknown-outcome code.
+SMTP sends are single-attempt too: failures before `DATA` transmission return
+503 (queued: `request_not_dispatched` or retryable `provider_unauthorized` /
+`provider_throttled`), 5xx rejections return 502, and timeouts or disconnects
+after transmitting `DATA` return the unknown-outcome code (`held_unknown`).
 
 Every synchronous send runs on one budget (`deadline-machines`): Mothership's
 `request_timeout` for the bay, read from `MS_BAY_DRAIN_TIMEOUT` (60 s when
@@ -478,7 +518,7 @@ spends the last 5 s, and a lookup that cannot finish in what is left counts as
 `unknown`. The provider call's timeout is cut to the remaining budget; with
 under 2 s left nothing is sent and the answer is 503 `code: "budget_spent"`
 (`Hailer::UnavailableError`, safe to retry). Queued dispatch keeps the
-provider's own 20 s timeout.
+provider's own timeout (20 s for SES and Postmark, 30 s for SMTP).
 
 ## Fault injection
 
@@ -500,7 +540,7 @@ monotonic clock from the time PostgreSQL says is left.
 
 | Target | `raise` | `delay` | `garble` |
 | --- | --- | --- | --- |
-| `provider` (SES/Postmark) | unreachable: nothing sent; sync sends answer 503 and count against the breaker, queued dispatch retries | served inside the send timeout; at least as long is an unknown outcome (queued: `held_unknown`) | sent, but the id comes back as `rogue-<id>` |
+| `provider` (SES/Postmark/SMTP) | unreachable: nothing sent; sync sends answer 503 and count against the breaker, queued dispatch retries | served inside the send timeout; at least as long is an unknown outcome (queued: `held_unknown`) | sent, but the id comes back as `rogue-<id>` |
 | `feedback` (SQS) | receive fails, consumer backs off | receive starts late | bodies replaced and left unacknowledged, so SQS redelivers them |
 | `verifier` (Emailable) | lookup fails open as `unknown` | served inside the lookup budget | refused: a garbled verdict would be cached past the experiment |
 
@@ -518,7 +558,7 @@ missing code.
 ```sh
 bundle install
 bundle exec rake
-HAILER_TEST_DATABASE_URL=postgres://test_user:password@127.0.0.1/hailer_test cargo test --locked --features ses,postmark
+HAILER_TEST_DATABASE_URL=postgres://test_user:password@127.0.0.1/hailer_test cargo test --locked --features ses,postmark,smtp
 cargo fmt --all -- --check
 ```
 

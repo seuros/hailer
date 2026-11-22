@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use deadline_machines::Deadline;
 
 use crate::mail::SendRequest;
+use crate::outbound::Correlation;
 use crate::provider::{MailProvider, ProviderError};
 
 #[cfg(any(feature = "ses", feature = "postmark"))]
@@ -10,7 +11,14 @@ mod http;
 #[cfg(feature = "ses")]
 pub use http::routed;
 #[cfg(any(feature = "ses", feature = "postmark"))]
-pub use http::{Endpoint, correlation, endpoint, request};
+pub use http::{Endpoint, endpoint, request};
+
+pub fn correlation() -> Correlation {
+    Correlation {
+        hailer_message_id: "a74698dd-ecc2-45ac-a4ce-01abf5524578".into(),
+        attempt_id: "b74698dd-ecc2-45ac-a4ce-01abf5524578".into(),
+    }
+}
 
 /// MOCKED: a provider that accepts everything and records what it was sent.
 #[derive(Default)]

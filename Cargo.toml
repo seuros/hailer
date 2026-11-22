@@ -6,7 +6,7 @@ version = "0.8.0" # x-release-please-version
 edition = "2024"
 rust-version = "1.99"
 authors = ["Abdelkader Boudih <oss@seuros.com>"]
-description = "Outbound mail delivery ship for Mothership: SES or Postmark sender"
+description = "Outbound mail delivery ship for Mothership: SES, Postmark, or SMTP sender"
 license = "BSD-3-Clause"
 repository = "https://github.com/seuros/hailer"
 
@@ -17,6 +17,7 @@ path = "src/main.rs"
 [features]
 ses = ["dep:base64"]
 postmark = ["dep:mail-parser", "dep:base64"]
+smtp = ["dep:base64"]
 
 [dependencies]
 tokio = { version = "1", features = ["full", "signal"] }

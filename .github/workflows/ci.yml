@@ -76,6 +76,7 @@ jobs:
       - name: Test
         run: |
           bundle exec rake test
-          cargo test --release --locked --features ses,postmark
+          cargo test --release --locked --features ses,postmark,smtp
           cargo check --locked --features ses
           cargo check --locked --features postmark
+          cargo check --locked --features smtp

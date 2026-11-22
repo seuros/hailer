@@ -22,7 +22,7 @@ pub enum ConfigError {
     InvalidEnv(&'static str, &'static str),
     #[error("configuration {0} is invalid: {1}")]
     InvalidConfig(&'static str, &'static str),
-    #[cfg(not(all(feature = "ses", feature = "postmark")))]
+    #[cfg(not(all(feature = "ses", feature = "postmark", feature = "smtp")))]
     #[error("this hailer was built without `{0}`: rebuild with --features {0}")]
     MissingFeature(&'static str),
 }
@@ -97,6 +97,7 @@ pub struct Config {
     #[serde(default)]
     pub provider: ProviderKind,
     pub postmark: Option<PostmarkConfig>,
+    pub smtp: Option<SmtpConfig>,
     pub ses_configuration_set: Option<String>,
     pub email_verification: Option<EmailVerificationConfig>,
     /// Only meaningful for the queued pipeline - a synchronous send has no
@@ -113,17 +114,69 @@ pub enum ProviderKind {
     #[default]
     Ses,
     Postmark,
+    Smtp,
 }
 
-#[cfg(not(all(feature = "ses", feature = "postmark")))]
+#[cfg(not(all(feature = "ses", feature = "postmark", feature = "smtp")))]
 impl ProviderKind {
     /// The cargo feature that compiles this provider in.
     pub const fn feature(self) -> &'static str {
         match self {
             Self::Ses => "ses",
             Self::Postmark => "postmark",
+            Self::Smtp => "smtp",
         }
     }
+}
+
+/// `SMTP_USERNAME` and `SMTP_PASSWORD` are read from the environment, never
+/// from here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub tls: SmtpTlsMode,
+    #[serde(default)]
+    pub auth: SmtpAuthMode,
+    pub helo_domain: Option<String>,
+}
+
+impl SmtpConfig {
+    pub const fn effective_port(&self) -> u16 {
+        match self.port {
+            Some(port) => port,
+            None => match self.tls {
+                SmtpTlsMode::Starttls => 587,
+                SmtpTlsMode::Implicit => 465,
+                SmtpTlsMode::None => 25,
+            },
+        }
+    }
+
+    pub fn effective_helo_domain(&self) -> &str {
+        self.helo_domain.as_deref().unwrap_or("localhost")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmtpTlsMode {
+    #[default]
+    Starttls,
+    Implicit,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmtpAuthMode {
+    #[default]
+    Auto,
+    Plain,
+    Login,
+    None,
 }
 
 /// `POSTMARK_SERVER_TOKEN` is read from the environment, never from here.
@@ -289,6 +342,7 @@ impl Default for Config {
             queued: None,
             provider: ProviderKind::default(),
             postmark: None,
+            smtp: None,
             ses_configuration_set: None,
             email_verification: None,
             domain_intel: None,
@@ -423,12 +477,16 @@ impl Config {
 
     fn validate_provider(&self) -> Result<(), ConfigError> {
         match self.provider {
-            ProviderKind::Ses => reject_if(
-                self.postmark.is_some(),
-                "postmark",
-                "only valid with provider = \"postmark\"",
-            ),
+            ProviderKind::Ses => {
+                reject_if(
+                    self.postmark.is_some(),
+                    "postmark",
+                    "only valid with provider = \"postmark\"",
+                )?;
+                reject_if(self.smtp.is_some(), "smtp", "only valid with provider = \"smtp\"")
+            }
             ProviderKind::Postmark => {
+                reject_if(self.smtp.is_some(), "smtp", "only valid with provider = \"smtp\"")?;
                 for (set, name) in [
                     (self.ses_configuration_set.is_some(), "ses_configuration_set"),
                     (self.feedback.is_some(), "feedback"),
@@ -453,8 +511,49 @@ impl Config {
                     "expected 1..100 ASCII letters, digits, underscores or hyphens",
                 )
             }
+            ProviderKind::Smtp => {
+                reject_if(
+                    self.postmark.is_some(),
+                    "postmark",
+                    "only valid with provider = \"postmark\"",
+                )?;
+                for (set, name) in [
+                    (self.ses_configuration_set.is_some(), "ses_configuration_set"),
+                    (self.feedback.is_some(), "feedback"),
+                    (self.suppression_sync.is_some(), "suppression_sync"),
+                    (
+                        self.rate_limit.as_ref().is_some_and(|rate| rate.discover_from_aws),
+                        "rate_limit.discover_from_aws",
+                    ),
+                ] {
+                    reject_if(set, name, "SES only; unavailable with provider = \"smtp\"")?;
+                }
+                let Some(smtp) = &self.smtp else {
+                    return Err(ConfigError::InvalidConfig(
+                        "smtp",
+                        "required with provider = \"smtp\"",
+                    ));
+                };
+                reject_if(
+                    !is_valid_smtp_token(&smtp.host),
+                    "smtp.host",
+                    "expected non-empty hostname or IP (<= 253 ASCII printable characters, no whitespace)",
+                )?;
+                reject_if(smtp.port == Some(0), "smtp.port", "expected a port in 1..=65535")?;
+                reject_if(
+                    smtp.helo_domain.as_deref().is_some_and(|domain| !is_valid_smtp_token(domain)),
+                    "smtp.helo_domain",
+                    "expected non-empty domain (<= 253 ASCII printable characters, no whitespace)",
+                )
+            }
         }
     }
+}
+
+fn is_valid_smtp_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.bytes().all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'<' | b'>'))
 }
 
 #[cfg(test)]

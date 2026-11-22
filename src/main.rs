@@ -13,12 +13,14 @@
 //! operations within a bounded deadline. Sends interrupted at that deadline
 //! can still have ambiguous outcomes and must not be blindly retried.
 #![cfg_attr(
-    not(all(feature = "ses", feature = "postmark")),
-    allow(dead_code, reason = "a single-provider build leaves the other provider's half unused")
+    not(all(feature = "ses", feature = "postmark", feature = "smtp")),
+    allow(dead_code, reason = "a single-provider build leaves other providers unused")
 )]
 
-#[cfg(not(any(feature = "ses", feature = "postmark")))]
-compile_error!("hailer needs a mail provider: build with --features ses, postmark, or both");
+#[cfg(not(any(feature = "ses", feature = "postmark", feature = "smtp")))]
+compile_error!(
+    "hailer needs a mail provider: build with --features ses, postmark, smtp, or a combination"
+);
 
 #[cfg(feature = "ses")]
 mod aws;
@@ -52,6 +54,8 @@ use std::sync::Arc;
 use provider::postmark::PostmarkProvider;
 #[cfg(feature = "ses")]
 use provider::ses::SesProvider;
+#[cfg(feature = "smtp")]
+use provider::smtp::{SmtpCredentials, SmtpProvider};
 use tracing::{error, info, warn};
 
 use crate::config::{
@@ -111,6 +115,8 @@ enum Command {
     SesIdentities(SesIdentitiesArgs),
     /// Check the Postmark server token and name the server it belongs to
     PostmarkServer,
+    /// Connect to the configured SMTP server, verify TLS/auth, and print capabilities
+    SmtpCheck,
     /// Arm a fault-injection experiment on every replica with [rogue]; it disarms itself on expiry
     ArmExperiment(ArmArgs),
     /// Disarm one target's experiment, or every experiment without --target
@@ -248,6 +254,16 @@ async fn main() -> anyhow::Result<()> {
     );
     let config = Config::load(config_path)?;
     config.validate()?;
+    if matches!(args.command, Some(Command::SmtpCheck)) {
+        #[cfg(feature = "smtp")]
+        {
+            let report = smtp(&config)?.check().await?;
+            println!("{}", serde_json::to_string(&report)?);
+            return Ok(());
+        }
+        #[cfg(not(feature = "smtp"))]
+        return Err(ConfigError::MissingFeature("smtp").into());
+    }
     let database_url = std::env::var("HAILER_DATABASE_URL")
         .map_err(|_| anyhow::anyhow!("set HAILER_DATABASE_URL to Hailer's PostgreSQL database"))?;
     let store = state::Store::connect(&database_url, config.database_pool_size).await?;
@@ -325,12 +341,19 @@ async fn dock(docking: DockingConfig, config: Config, store: state::Store) -> an
             supervisor::run(docking, config, provider, store, control, verifier, intel, experiments)
                 .await
         }
-        #[cfg(not(all(feature = "ses", feature = "postmark")))]
+        #[cfg(feature = "smtp")]
+        config::ProviderKind::Smtp => {
+            let provider = Arc::new(smtp(&config)?.with_experiments(experiments.clone()));
+            supervisor::run(docking, config, provider, store, control, verifier, intel, experiments)
+                .await
+        }
+        #[cfg(not(all(feature = "ses", feature = "postmark", feature = "smtp")))]
         missing => Err(ConfigError::MissingFeature(missing.feature()).into()),
     }
 }
 
 /// The commands that talk to a provider; `false` when `command` is not one.
+#[cfg_attr(not(any(feature = "ses", feature = "postmark")), expect(clippy::unused_async))]
 async fn provider_command(
     command: &Command,
     #[cfg_attr(not(feature = "ses"), expect(unused_variables))] store: &state::Store,
@@ -343,29 +366,32 @@ async fn provider_command(
             let source = suppression_sync::AwsSuppressions::new(aws).await?;
             let report = suppression_sync::run(&source, store, *restart).await?;
             println!("{}", serde_json::to_string(&report)?);
+            Ok(true)
         }
         #[cfg(feature = "ses")]
-        Command::SesAccount => print_ses_account().await?,
+        Command::SesAccount => {
+            print_ses_account().await?;
+            Ok(true)
+        }
         #[cfg(feature = "ses")]
         Command::SesIdentities(SesIdentitiesArgs { identities }) => {
             print_ses_identities(identities).await?;
+            Ok(true)
         }
         #[cfg(not(feature = "ses"))]
         Command::SyncSuppressions(_) | Command::SesAccount | Command::SesIdentities(_) => {
-            return Err(ConfigError::MissingFeature("ses").into());
+            Err(ConfigError::MissingFeature("ses").into())
         }
         #[cfg(feature = "postmark")]
         Command::PostmarkServer => {
             let server = postmark(config)?.server().await?;
             println!("{}", serde_json::to_string(&server)?);
+            Ok(true)
         }
         #[cfg(not(feature = "postmark"))]
-        Command::PostmarkServer => {
-            return Err(ConfigError::MissingFeature("postmark").into());
-        }
-        _ => return Ok(false),
+        Command::PostmarkServer => Err(ConfigError::MissingFeature("postmark").into()),
+        _ => Ok(false),
     }
-    Ok(true)
 }
 
 /// `POSTMARK_SERVER_TOKEN` comes from the environment, like `EMAILABLE_API_KEY`.
@@ -374,6 +400,33 @@ fn postmark(config: &Config) -> anyhow::Result<PostmarkProvider> {
     let token = std::env::var("POSTMARK_SERVER_TOKEN")
         .map_err(|_| ConfigError::MissingEnv("POSTMARK_SERVER_TOKEN"))?;
     Ok(PostmarkProvider::new(token, &config.postmark.clone().unwrap_or_default()))
+}
+
+/// `SMTP_USERNAME` and `SMTP_PASSWORD` come from the environment, never from
+/// `hailer.toml`.
+#[cfg(feature = "smtp")]
+fn smtp(config: &Config) -> anyhow::Result<SmtpProvider> {
+    let smtp_cfg = config
+        .smtp
+        .as_ref()
+        .ok_or(ConfigError::InvalidConfig("smtp", "required with provider = \"smtp\""))?;
+    let credentials = smtp_credentials(smtp_cfg.auth)?;
+    Ok(SmtpProvider::new(smtp_cfg, credentials))
+}
+
+#[cfg(feature = "smtp")]
+fn smtp_credentials(auth: config::SmtpAuthMode) -> Result<Option<SmtpCredentials>, ConfigError> {
+    if auth == config::SmtpAuthMode::None {
+        return Ok(None);
+    }
+    let user = std::env::var("SMTP_USERNAME").ok().filter(|v| !v.is_empty());
+    let pass = std::env::var("SMTP_PASSWORD").ok().filter(|v| !v.is_empty());
+    match (user, pass, auth) {
+        (Some(username), Some(password), _) => Ok(Some(SmtpCredentials { username, password })),
+        (None, None, config::SmtpAuthMode::Auto) => Ok(None),
+        (None, _, _) => Err(ConfigError::MissingEnv("SMTP_USERNAME")),
+        (Some(_), None, _) => Err(ConfigError::MissingEnv("SMTP_PASSWORD")),
+    }
 }
 
 /// `EMAILABLE_API_KEY` is read here, not from `hailer.toml` - matching how

@@ -3,11 +3,20 @@ threads = 2
 database_pool_size = 5
 shutdown_timeout_seconds = 30
 
-# "ses" (default) or "postmark". Postmark reads POSTMARK_SERVER_TOKEN from the
-# environment and refuses the SES-only settings below.
+# "ses" (default), "postmark", or "smtp". Postmark reads POSTMARK_SERVER_TOKEN
+# and SMTP reads SMTP_USERNAME / SMTP_PASSWORD from the environment; both
+# refuse the SES-only settings below.
 # provider = "postmark"
 # [postmark]
 # message_stream = "outbound"
+#
+# provider = "smtp"
+# [smtp]
+# host = "mail.example.com"
+# port = 587            # defaults: 587 (starttls), 465 (implicit), 25 (none)
+# tls = "starttls"      # "starttls" (default), "implicit", or "none"
+# auth = "auto"         # "auto" (default), "plain", "login", or "none"
+# helo_domain = "mail.example.com"
 
 # Optional SES event-publishing configuration set. Its events must include mail
 # tags and reach the dedicated SNS/SQS feedback route to resolve unknown sends.

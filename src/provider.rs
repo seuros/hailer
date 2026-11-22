@@ -1,8 +1,9 @@
 //! Pluggable outbound send backends.
 //!
 //! One backend is active per deployment, chosen in `main.rs` from
-//! [`crate::config::Config`]: SES (`provider/ses.rs`) or Postmark
-//! (`provider/postmark.rs`). Neither `bay.rs` nor `mail.rs` knows which.
+//! [`crate::config::Config`]: SES (`provider/ses.rs`), Postmark
+//! (`provider/postmark.rs`), or SMTP (`provider/smtp.rs`). Neither `bay.rs`
+//! nor `mail.rs` knows which.
 
 pub mod domain_block_guard;
 pub mod guard;
@@ -11,6 +12,8 @@ pub mod postmark;
 pub mod queued;
 #[cfg(feature = "ses")]
 pub mod ses;
+#[cfg(feature = "smtp")]
+pub mod smtp;
 #[cfg(test)]
 pub mod test_support;
 pub mod verify_guard;

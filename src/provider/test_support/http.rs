@@ -5,7 +5,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::mail::SendRequest;
-use crate::outbound::Correlation;
 
 pub fn request() -> SendRequest {
     SendRequest {
@@ -14,13 +13,6 @@ pub fn request() -> SendRequest {
         to_addresses: vec!["bob@example.dev".into()],
         cc_addresses: vec![],
         bcc_addresses: vec![],
-    }
-}
-
-pub fn correlation() -> Correlation {
-    Correlation {
-        hailer_message_id: "a74698dd-ecc2-45ac-a4ce-01abf5524578".into(),
-        attempt_id: "b74698dd-ecc2-45ac-a4ce-01abf5524578".into(),
     }
 }
 
